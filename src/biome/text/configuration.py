@@ -1,7 +1,6 @@
 import copy
+import dataclasses
 import logging
-from biome.text.dataset import InstancesDataset
-from biome.text.dataset import Dataset
 from typing import Any
 from typing import Dict
 from typing import List
@@ -9,7 +8,6 @@ from typing import Optional
 from typing import Type
 from typing import Union
 
-import dataclasses
 import yaml
 from allennlp.common import FromParams
 from allennlp.common import Params
@@ -17,6 +15,9 @@ from allennlp.common.checks import ConfigurationError
 from allennlp.data import TokenIndexer
 from allennlp.data import Vocabulary
 from allennlp.modules import TextFieldEmbedder
+
+from biome.text.dataset import Dataset
+from biome.text.dataset import InstancesDataset
 
 from . import vocabulary
 from .features import CharFeatures
@@ -273,11 +274,15 @@ class PipelineConfiguration(FromParams):
 
         # make sure we use the right tokenizer/indexer/embedder for the transformers feature
         if self.tokenizer_config.transformers_kwargs:
-            self.features.transformers.is_mismatched = False
+            if self.features.transformers.mismatched is None:
+                self.features.transformers.mismatched = False
             if self.tokenizer_config.transformers_kwargs.get("model_name") is None:
                 self.tokenizer_config.transformers_kwargs[
                     "model_name"
                 ] = self.features.transformers.model_name
+        else:
+            if self.features.transformers.mismatched is None:
+                self.features.transformers.mismatched = True
 
         self._check_for_incompatible_configurations()
 
@@ -303,12 +308,6 @@ class PipelineConfiguration(FromParams):
                 raise ConfigurationError(
                     "You are trying to use word or char features on subwords and possibly special tokens."
                     "This is not recommended!"
-                )
-
-            if "TokenClassification" in self.head.config["type"]:
-                raise NotImplementedError(
-                    "You specified a transformers tokenizer, "
-                    "but the 'TokenClassification' head is still not capable of dealing with subword/special tokens."
                 )
 
             if (
@@ -518,7 +517,9 @@ class TrainerConfiguration:
             "patience": self.patience,
             "validation_metric": self.validation_metric,
             "num_epochs": self.num_epochs,
-            "checkpointer": {"num_serialized_models_to_keep": self.num_serialized_models_to_keep},
+            "checkpointer": {
+                "num_serialized_models_to_keep": self.num_serialized_models_to_keep
+            },
             "cuda_device": self.cuda_device,
             "grad_norm": self.grad_norm,
             "grad_clipping": self.grad_clipping,

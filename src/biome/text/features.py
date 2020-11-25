@@ -1,11 +1,15 @@
-from typing import Any, Dict, Optional
-from abc import ABC, abstractmethod
+from abc import ABC
+from abc import abstractmethod
+from typing import Any
+from typing import Dict
+from typing import Optional
 
 from biome.text.modules.configuration import Seq2VecEncoderConfiguration
 
 
 class Features(ABC):
     """All features used in the pipeline configuration inherit from this abstract class."""
+
     @property
     @abstractmethod
     def config(self):
@@ -181,6 +185,13 @@ class TransformersFeatures(Features):
         When `True`, only the final layer of the pretrained transformer is taken
         for the embeddings. But if set to `False`, a scalar mix of all of the layers
         is used.
+    mismatched
+        Set this to True, if you are not using the corresponding transformers tokenizer. We then assume taht you are
+        using a tokenizer that splits the strings into words and will simply sum up the wordpiece vectors in a word
+        to pull out a single vector for each word.
+        If this is set to False, we assume you are using the corresponding transformers tokenizer
+        and we will provide vectors for each wordpiece.
+        By default this is set to None, and we will automatically choose the value based on your pipeline configuration.
     """
 
     namespace = "transformers"
@@ -191,11 +202,12 @@ class TransformersFeatures(Features):
         trainable: bool = False,
         max_length: Optional[int] = None,
         last_layer_only: bool = True,
+        mismatched: Optional[bool] = None,
     ):
         self.model_name = model_name
         self.trainable = trainable
         self.max_length = max_length
-        self.is_mismatched = True
+        self.mismatched = mismatched
         self.last_layer_only = last_layer_only
 
     @property
@@ -204,7 +216,7 @@ class TransformersFeatures(Features):
         config = {
             "indexer": {
                 "type": "pretrained_transformer_mismatched"
-                if self.is_mismatched
+                if self.mismatched
                 else "pretrained_transformer",
                 "model_name": self.model_name,
                 "namespace": self.namespace,
@@ -212,7 +224,7 @@ class TransformersFeatures(Features):
             },
             "embedder": {
                 "type": "pretrained_transformer_mismatched"
-                if self.is_mismatched
+                if self.mismatched
                 else "pretrained_transformer",
                 "model_name": self.model_name,
                 "train_parameters": self.trainable,
