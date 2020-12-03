@@ -1,8 +1,11 @@
 from typing import Dict
 
-import pandas as pd
 import pytest
-from biome.text import TrainerConfiguration, VocabularyConfiguration, Dataset, Pipeline
+
+from biome.text import Dataset
+from biome.text import Pipeline
+from biome.text import TrainerConfiguration
+from biome.text import VocabularyConfiguration
 
 
 @pytest.fixture
@@ -94,11 +97,5 @@ def test_train(pipeline_dict, training_dataset, trainer_dict, tmp_path):
         validation=training_dataset,
     )
 
-    pl_trained = Pipeline.from_pretrained(str(tmp_path / "relation_classifier"))
-    pl_trained.predict(
-        text="The most common audits were about waste and recycling",
-        entities=[
-            {"start": 34, "end": 39, "label": "OBJECT", "text": "waste"},
-            {"start": 16, "end": 22, "label": "SUBJECT", "text": "audits"},
-        ],
-    )
+    # test loading
+    Pipeline.from_pretrained(str(tmp_path / "relation_classifier"))

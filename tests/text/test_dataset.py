@@ -1,15 +1,18 @@
-import os
 import time
 from pathlib import Path
 
 import pandas as pd
 import pytest
-from allennlp.data import AllennlpDataset, AllennlpLazyDataset, Instance
-from elasticsearch import Elasticsearch
-
-from biome.text import Dataset, Pipeline, explore
+from allennlp.data import AllennlpDataset
+from allennlp.data import AllennlpLazyDataset
+from allennlp.data import Instance
 from datasets.features import Features
 from datasets.features import Value
+from elasticsearch import Elasticsearch
+
+from biome.text import Dataset
+from biome.text import Pipeline
+from biome.text import explore
 
 
 @pytest.fixture(scope="class")
@@ -148,16 +151,19 @@ def test_from_elasticsearch(dataset, default_pipeline_config):
     es_index = explore.create(
         pipeline, dataset, explore_id="test_index", show_explore=False
     )
+    query = {"match_all": {}}
     es_client = Elasticsearch()
     __wait_for_index_creation__(es_client, es_index)
-
-    ds = Dataset.from_elasticsearch(
-        es_client, index=es_index, query={"query": {"match_all": {}}}
-    )
+    ds = Dataset.from_elasticsearch(es_client, index=es_index, query={"query": query})
 
     assert len(ds) == len(dataset)
     for key in ["_id", "_index", "_type"]:
         assert key in ds.column_names
+
+    query = {"exists": {"field": "not_found.field"}}
+
+    ds = Dataset.from_elasticsearch(es_client, index=es_index, query={"query": query})
+    assert len(ds) == 0
 
 
 def test_to_instances(dataset, default_pipeline_config):
