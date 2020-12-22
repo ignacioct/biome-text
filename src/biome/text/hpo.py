@@ -5,21 +5,23 @@ It tries to allow for a simple integration with HPO libraries like Ray Tune.
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable
+from typing import List
+from typing import Optional
 
 import mlflow
 from allennlp.data import Vocabulary
 from ray import tune
 
-from biome.text import Pipeline, TrainerConfiguration, VocabularyConfiguration, helpers
+from biome.text import Pipeline
+from biome.text import TrainerConfiguration
+from biome.text import helpers
 from biome.text.dataset import Dataset
 from biome.text.errors import ValidationError
-from biome.text.loggers import (
-    BaseTrainLogger,
-    MlflowLogger,
-    WandBLogger,
-    is_wandb_installed_and_logged_in,
-)
+from biome.text.loggers import BaseTrainLogger
+from biome.text.loggers import MlflowLogger
+from biome.text.loggers import WandBLogger
+from biome.text.loggers import is_wandb_installed_and_logged_in
 
 
 class TuneMetricsLogger(BaseTrainLogger):
@@ -31,12 +33,13 @@ class TuneMetricsLogger(BaseTrainLogger):
     @staticmethod
     def _metric_should_be_reported(metric_name: str) -> bool:
         """Determines if a metric should be reported"""
-        # fmt:off
         return (
             not metric_name.startswith("validation__")
             and metric_name.startswith("validation_")
+        ) or (
+            not metric_name.startswith("best_validation__")
+            and metric_name.startswith("best_validation_")
         )
-        # fmt: on
 
     def log_epoch_metrics(self, epoch, metrics):
         # fmt: off
@@ -241,16 +244,13 @@ class TuneExperiment(tune.Experiment):
         if is_wandb_installed_and_logged_in():
             train_loggers = [WandBLogger(project_name=config["name"])] + train_loggers
 
-        if pipeline.has_empty_vocab():
-            vocab_config = VocabularyConfiguration(sources=[train_ds, valid_ds])
-            pipeline.create_vocabulary(vocab_config)
-
         pipeline.train(
             output="training",
             training=train_ds,
             validation=valid_ds,
             trainer=trainer_config,
             loggers=train_loggers,
+            vocab_config=None if config["vocab_path"] else "default",
         )
 
     def __del__(self):
