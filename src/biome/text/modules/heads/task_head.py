@@ -48,6 +48,7 @@ class TaskName(Enum):
     text_classification = 1
     token_classification = 2
     language_modelling = 3
+    NORM_classification = 4
 
     def __str__(self) -> str:
         return str(self.name)

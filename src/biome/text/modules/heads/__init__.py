@@ -18,7 +18,7 @@ from .task_head import TaskName
 from .task_head import TaskOutput
 from .token_classification import TokenClassification
 from .token_classification import TokenClassificationConfiguration
-from .token_classification import NORMClassification
+from .norm_classification import NORMClassification
 
 for head in [
     TextClassification,

@@ -58,7 +58,7 @@ class NORMClassification(TaskHead):
         Grade
             1-digit number. 9 possible values
         /H
-            Exists or not. 
+            Exists or not.
 
     top_k
     dropout
@@ -67,7 +67,7 @@ class NORMClassification(TaskHead):
 
     __LOGGER = logging.getLogger(__name__)
 
-    task_name = TaskName.NORMclassification
+    task_name = TaskName.NORM_classification
 
     def __init__(
         self,
@@ -79,7 +79,7 @@ class NORMClassification(TaskHead):
         label_encoding: Optional[str] = "BIOUL",
         dropout: Optional[float] = 0.0,
     ) -> None:
-        super(TokenClassification, self).__init__(backbone)
+        super(NORM_Classification, self).__init__(backbone)
 
         if label_encoding not in ["BIOUL", "BIO"]:
             raise WrongValueError(

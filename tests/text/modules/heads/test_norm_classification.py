@@ -7,13 +7,12 @@ from biome.text import Dataset
 from biome.text import Pipeline
 from biome.text import TrainerConfiguration
 from biome.text import VocabularyConfiguration
-from biome.text import Vocabulary
+from biome.text import vocabulary
 from biome.text.modules.heads import TaskOutput
 
 
 @pytest.fixture
 def training_dataset() -> Dataset:
-    #TODO: primeras dos lineas de json
     df = pd.DataFrame(
         {
             "text_org": "Prueba uno",
@@ -56,7 +55,7 @@ def training_dataset() -> Dataset:
 @pytest.fixture
 def pipeline_dict() -> Dict:
     pipeline_dict = {
-        "name": "biome-bimpm",
+        "name": "norm_test",
         "features": {"word": {"embedding_dim": 2}},
         "head": {
             "type": "NORMClassification",
@@ -76,5 +75,6 @@ def test_pipeline_creation(pipeline_dict):
 
 def test_vocab_creation(pipeline_dict):
     pipeline = Pipeline.from_config(pipeline_dict)
-    assert Vocabulary.words_vocab_size(pipeline.vocab)
-    assert Vocabulary.is_empty(pipeline.vocab, ["3D_tags", "4D_tags", "bgh_tags"])
+    assert vocabulary.words_vocab_size(pipeline.vocab)
+    assert vocabulary.is_empty(pipeline.vocab, ["3D_tags", "4D_tags", "bgh_tags"])
+    
