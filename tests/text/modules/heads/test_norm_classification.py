@@ -10,6 +10,7 @@ from biome.text import VocabularyConfiguration
 from biome.text import vocabulary
 from biome.text.modules.heads import TaskOutput
 
+WANDB_MODE='disabled'
 
 @pytest.fixture
 def training_dataset() -> Dataset:

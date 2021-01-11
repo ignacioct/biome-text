@@ -67,7 +67,7 @@ class NORMClassification(TaskHead):
 
     __LOGGER = logging.getLogger(__name__)
 
-    task_name = TaskName.NORM_classification
+    task_name = TaskName.norm_classification
 
     def __init__(
         self,
@@ -79,7 +79,7 @@ class NORMClassification(TaskHead):
         label_encoding: Optional[str] = "BIOUL",
         dropout: Optional[float] = 0.0,
     ) -> None:
-        super(NORM_Classification, self).__init__(backbone)
+        super(NORMClassification, self).__init__(backbone)
 
         if label_encoding not in ["BIOUL", "BIO"]:
             raise WrongValueError(
