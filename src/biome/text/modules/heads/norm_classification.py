@@ -29,7 +29,7 @@ from biome.text.helpers import tags_from_offsets
 from biome.text.modules.configuration import ComponentConfiguration
 from biome.text.modules.configuration import FeedForwardConfiguration
 
-from ...errors import WrongValueError
+from ...errors import EmptyVocabError, WrongValueError
 from .task_head import TaskHead
 from .task_head import TaskName
 from .task_head import TaskOutput
@@ -102,14 +102,12 @@ class NORMClassification(TaskHead):
         )
 
         #Extending vocabulary for the medical codes
-        for code in threeDs:
-            self.backbone.vocab.add_tokens_to_namespace(code, namespace='3D_tags')
-            
-        for code in fourD:
-            self.backbone.vocab.add_tokens_to_namespace(code, namespace='4D_tags')
 
-        for code in bgh:
-            self.backbone.vocab.add_tokens_to_namespace(code, namespace='BGH_tags')
+        self.backbone.vocab.add_tokens_to_namespace(threeDs, namespace='3D_tags')
+
+        self.backbone.vocab.add_tokens_to_namespace(fourD, namespace='4D_tags')
+
+        self.backbone.vocab.add_tokens_to_namespace(bgh, namespace='bgh_tags')
 
         self.dropout = torch.nn.Dropout(dropout)
 
@@ -124,7 +122,7 @@ class NORMClassification(TaskHead):
             torch.nn.Linear(self._classifier_input_dim, self.num_labels)
         )
 
-        self._threeDs_projection_layer_ = TimeDistributed(
+        self._threeDs_projection_layer = TimeDistributed(
             torch.nn.Linear(self._classifier_input_dim, len(threeDs))
         )
 
@@ -218,7 +216,7 @@ class NORMClassification(TaskHead):
             )
 
             #3Ds
-            assert tags, f"No 3D codes found when training. Data [{tokens, threeDs}]"
+            assert tags, f"No 3Ds codes found when training. Data [{tokens, threeDs}]"
             instance.add_field(
                 "threeDs",
                 SequenceLabelField(
@@ -229,7 +227,7 @@ class NORMClassification(TaskHead):
             )
 
             #4D
-            assert tags, f"No 3D codes found when training. Data [{tokens, fourD}]"
+            assert tags, f"No 4D codes found when training. Data [{tokens, fourD}]"
             instance.add_field(
                 "fourD",
                 SequenceLabelField(
@@ -240,7 +238,7 @@ class NORMClassification(TaskHead):
             )
 
             #BGH
-            assert tags, f"No 3D codes found when training. Data [{tokens, bgh}]"
+            assert tags, f"No BGH codes found when training. Data [{tokens, bgh}]"
             instance.add_field(
                 "bgh",
                 SequenceLabelField(
@@ -253,3 +251,79 @@ class NORMClassification(TaskHead):
 
 
         return instance
+
+    def forward(self, text: TextFieldTensors, raw_text: List[Union[str, List[str]]], tags: torch.IntTensor=None, threeDs: torch.IntTensor=None, fourD: torch.IntTensor=None, bgh: torch.IntTensor=None) -> TaskOutput:
+
+        mask = get_text_field_mask(text)    # returns a mask with 0 where the tokens are padding, and 1 otherwise.
+        embedded_text = self.dropout(self.backbone.forward(text, mask))     # applying dropout to text tensor and mask tensor
+
+        # Creating feedforward layer if there is none
+        if self._feedforward is not None:
+            embedded_text = self._feedforward(embedded_text)
+        
+        label_logits = self._label_projection_layer(embedded_text)
+        threeDs_logits = self._threeDs_projection_layer(embedded_text)
+        fourD_logits = self._fourD_projection_layer(embedded_text)
+        bgh_logits = self._bgh_projection_layer(embedded_text)
+        
+        # Viterbi paths
+        # dims are: batch, top_k, (tag_sequence, viterbi_score)
+        viterbi_paths_labels: List[List[Tuple[List[int], float]]] = self._crf.viterbi_tags(
+            label_logits, mask, top_k=self.top_k
+        )
+        viterbi_paths_threeDs: List[List[Tuple[List[int], float]]] = self._crf.viterbi_tags(
+            threeDs_logits, mask, top_k=self.top_k
+        )
+        viterbi_paths_fourD: List[List[Tuple[List[int], float]]] = self._crf.viterbi_tags(
+            fourD_logits, mask, top_k=self.top_k
+        )
+        viterbi_paths_bgh: List[List[Tuple[List[int], float]]] = self._crf.viterbi_tags(
+            bgh_logits, mask, top_k=self.top_k
+        )
+
+        # Predicted tags
+        # we just keep the best path for every instance
+        predicted_tags_labels: List[List[int]] = [paths[0][0] for paths in viterbi_paths_labels]
+        class_probabilities_labels = label_logits * 0.0
+
+        predicted_tags_threeDs: List[List[int]] = [paths[0][0] for paths in viterbi_paths_threeDs]
+        class_probabilities_threeDs = threeDs_logits * 0.0
+
+        predicted_tags_fourD: List[List[int]] = [paths[0][0] for paths in viterbi_paths_fourD]
+        class_probabilities_fourD = fourD_logits * 0.0
+
+        predicted_tags_bgh: List[List[int]] = [paths[0][0] for paths in viterbi_paths_bgh]
+        class_probabilities_bgh = bgh_logits * 0.0
+
+        # Class probabilities assignation
+        for i, instance_tags in enumerate(predicted_tags_labels):
+            for j, tag_id in enumerate(instance_tags):
+                class_probabilities_labels[i, j, tag_id] = 1
+
+        for i, instance_tags in enumerate(predicted_tags_threeDs):
+            for j, tag_id in enumerate(instance_tags):
+                class_probabilities_threeDs[i, j, tag_id] = 1
+
+        for i, instance_tags in enumerate(predicted_tags_fourD):
+            for j, tag_id in enumerate(instance_tags):
+                class_probabilities_fourD[i, j, tag_id] = 1
+
+        for i, instance_tags in enumerate(predicted_tags_bgh):
+            for j, tag_id in enumerate(instance_tags):
+                class_probabilities_bgh[i, j, tag_id] = 1
+
+        #TODO: revisar task output
+        output = TaskOutput(
+            logits=logits,
+            probs=class_probabilities,
+            viterbi_paths=viterbi_paths,
+            mask=mask,
+            raw_text=raw_text,
+        )
+
+        if tags is not None:
+            output.loss = self._loss(logits, tags, mask)
+            for metric in self.__all_metrics:
+                metric(class_probabilities, tags, mask)
+
+        return output

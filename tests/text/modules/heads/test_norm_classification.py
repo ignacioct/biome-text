@@ -10,10 +10,13 @@ from biome.text import VocabularyConfiguration
 from biome.text import vocabulary
 from biome.text.modules.heads import TaskOutput
 
-WANDB_MODE='disabled'
+# Disabling wandb, sometimes messes with the stdout
+import os
+os.environ["WANDB_MODE"] = "disabled"
 
 @pytest.fixture
 def training_dataset() -> Dataset:
+    """Dummy dataset, similar to CANTEMIST-NORM task"""
     df = pd.DataFrame(
         {
             "text_org": "Prueba uno",
@@ -55,6 +58,7 @@ def training_dataset() -> Dataset:
 
 @pytest.fixture
 def pipeline_dict() -> Dict:
+    """Dummy pipeline dict, targeting NER and NORM tasks of CANTEMIST"""
     pipeline_dict = {
         "name": "norm_test",
         "features": {"word": {"embedding_dim": 2}},
@@ -72,10 +76,16 @@ def pipeline_dict() -> Dict:
 
 
 def test_pipeline_creation(pipeline_dict):
+    """Tests the correct creation of the pipeline with NORM task head"""
     assert (Pipeline.from_config(pipeline_dict))
 
 def test_vocab_creation(pipeline_dict):
+    """Tests the correct creation of the vocab with NORM task head"""
     pipeline = Pipeline.from_config(pipeline_dict)
     assert vocabulary.words_vocab_size(pipeline.vocab)
-    assert vocabulary.is_empty(pipeline.vocab, ["3D_tags", "4D_tags", "bgh_tags"])
+    assert len(pipeline.vocab.get_namespaces()) > 0
+    assert pipeline.vocab.get_vocab_size("3D_tags") == len(pipeline_dict["head"]["threeDs"])
+    assert pipeline.vocab.get_vocab_size("4D_tags") == len(pipeline_dict["head"]["fourD"])
+    assert pipeline.vocab.get_vocab_size("bgh_tags") == len(pipeline_dict["head"]["bgh"])
+    
     
