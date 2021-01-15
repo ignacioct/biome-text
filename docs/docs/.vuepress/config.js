@@ -1,7 +1,11 @@
 const path = require("path");
-const glob = require("glob")
+const glob = require("glob");
 
-const baseContext = process.env.CONTEXT || 'docs/'
+// The env variable is set in our GitHub Action CI when building the docs.
+// It must be the same as the release tag or 'master', that is e.g. "v2.0.0" or "v2.1.0rc1" or "master"
+const basePath = process.env.BIOME_TEXT_DOC_VERSION
+    ? `/biome-text/${process.env.BIOME_TEXT_DOC_VERSION}/`
+    : "/biome-text/"
 
 function getSidebarChildren(location, replacement) {
     if (!replacement) {
@@ -18,10 +22,11 @@ module.exports = {
   title: 'biome.text',
   description: 'biome.text practical NLP open source library.',
   head: [
+    ['meta', { name: 'viewport', content: 'width=device-width, initial-scale=1.0' }],
     ['link', { rel: "shortcut icon", href: "/favicon.ico"}],
     ['meta', { property: 'og:image', content: 'https://www.recogn.ai/images/biome_og.png' }],
   ],
-  base: '/biome-text/',
+  base: basePath,
   plugins: [
     '@goy/svg-icons',
     '@vuepress/back-to-top'

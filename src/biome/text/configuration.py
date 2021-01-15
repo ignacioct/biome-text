@@ -26,7 +26,9 @@ from .featurizer import InputFeaturizer
 from .helpers import sanitize_for_params
 from .helpers import save_dict_as_yaml
 from .modules.encoders import Encoder
+from .modules.heads.classification.relation_classification import RelationClassification
 from .modules.heads.task_head import TaskHeadConfiguration
+from .modules.heads.token_classification import TokenClassification
 from .tokenizer import Tokenizer
 from .tokenizer import TransformersTokenizer
 
@@ -220,10 +222,13 @@ class TokenizerConfiguration(FromParams):
         A list of token strings to the sequence before tokenized input text.
     end_tokens
         A list of token strings to the sequence after tokenized input text.
+    use_transformers
+        If true, we will use a transformers tokenizer from HuggingFace and disregard all other parameters above.
+        If you specify any of the above parameters you want to set this to false.
+        If None, we automatically choose the right value based on your feature and head configuration.
     transformers_kwargs
-        If specified, we will use a pretrained transformers tokenizer and disregard all other parameters above.
-        This dict will be passed directly on to allenNLP's `PretrainedTransformerTokenizer` and should at least include
-        a `model_name` key.
+        This dict is passed on to AllenNLP's `PretrainedTransformerTokenizer`.
+        If no `model_name` key is provided, we will infer one from the features configuration.
     """
 
     # note: It's important that it inherits from FromParas so that `Pipeline.from_pretrained()` works!
@@ -238,6 +243,7 @@ class TokenizerConfiguration(FromParams):
         remove_space_tokens: bool = True,
         start_tokens: Optional[List[str]] = None,
         end_tokens: Optional[List[str]] = None,
+        use_transformers: Optional[bool] = None,
         transformers_kwargs: Optional[Dict] = None,
     ):
         self.lang = lang
@@ -249,7 +255,8 @@ class TokenizerConfiguration(FromParams):
         self.end_tokens = end_tokens
         self.use_spacy_tokens = use_spacy_tokens
         self.remove_space_tokens = remove_space_tokens
-        self.transformers_kwargs = transformers_kwargs
+        self.use_transformers = use_transformers
+        self.transformers_kwargs = transformers_kwargs or {}
 
     def __eq__(self, other):
         return all(a == b for a, b in zip(vars(self), vars(other)))
@@ -273,12 +280,14 @@ class PipelineConfiguration(FromParams):
     """
 
     __LOGGER = logging.getLogger(__name__)
+    # To be able to skip the configuration checks when testing
+    _SKIP_CHECKS = False
 
     def __init__(
         self,
         name: str,
         head: TaskHeadConfiguration,
-        features: FeaturesConfiguration = None,
+        features: Optional[FeaturesConfiguration] = None,
         tokenizer: Optional[TokenizerConfiguration] = None,
         encoder: Optional[Encoder] = None,
     ):
@@ -287,46 +296,58 @@ class PipelineConfiguration(FromParams):
         self.name = name
         self.head = head
         self.features = features or FeaturesConfiguration()
-        self.tokenizer_config = tokenizer or self._get_default_tokenizer()
+        self.tokenizer_config = tokenizer or TokenizerConfiguration()
 
-        # make sure we use the right tokenizer/indexer/embedder for the transformers feature
-        if self.tokenizer_config.transformers_kwargs:
-            self.features.transformers.is_mismatched = False
+        # figure out if we need a transformers tokenizer
+        if self.tokenizer_config.use_transformers is None:
+            self._use_transformers_tokenizer_if_sensible()
+
+        # make sure we use the right indexer/embedder for the transformers feature
+        if self.tokenizer_config.use_transformers:
+            self.features.transformers.mismatched = False
             if self.tokenizer_config.transformers_kwargs.get("model_name") is None:
                 self.tokenizer_config.transformers_kwargs[
                     "model_name"
                 ] = self.features.transformers.model_name
 
-        self._check_for_incompatible_configurations()
+        if not self._SKIP_CHECKS:
+            self._check_for_incompatible_configurations()
 
         self.encoder = encoder
 
-    def _get_default_tokenizer(self):
+    def _use_transformers_tokenizer_if_sensible(self):
         if (
+            # Only use word pieces if no word-based feature was chosen
             self.features.transformers is not None
             and self.features.word is None
             and self.features.char is None
+            # NER tags are usually given per word not per word pieces
+            and TokenClassification.__name__ not in self.head.config["type"]
+            and RelationClassification.__name__ not in self.head.config["type"]
         ):
-            return TokenizerConfiguration(
-                transformers_kwargs={
-                    "model_name": self.features.transformers.model_name
-                },
+            self.tokenizer_config.use_transformers = True
+            self.tokenizer_config.transformers_kwargs = (
+                self.tokenizer_config.transformers_kwargs
+                or {"model_name": self.features.transformers.model_name}
             )
-
-        return TokenizerConfiguration()
+        else:
+            self.tokenizer_config.use_transformers = False
 
     def _check_for_incompatible_configurations(self):
-        if self.tokenizer_config.transformers_kwargs:
+        if self.tokenizer_config.use_transformers:
             if self.features.word is not None or self.features.char is not None:
                 raise ConfigurationError(
                     "You are trying to use word or char features on subwords and possibly special tokens."
                     "This is not recommended!"
                 )
 
-            if "TokenClassification" in self.head.config["type"]:
+            if (
+                TokenClassification.__name__ in self.head.config["type"]
+                or RelationClassification.__name__ in self.head.config["type"]
+            ):
                 raise NotImplementedError(
-                    "You specified a transformers tokenizer, "
-                    "but the 'TokenClassification' head is still not capable of dealing with subword/special tokens."
+                    "You specified a transformers tokenizer, but the 'TokenClassification' and "
+                    "'RelationClassification' heads are still not capable of dealing with subword/special tokens."
                 )
 
             if (
@@ -409,7 +430,7 @@ class PipelineConfiguration(FromParams):
 
     def build_tokenizer(self) -> Tokenizer:
         """Build the pipeline tokenizer"""
-        if self.tokenizer_config.transformers_kwargs is not None:
+        if self.tokenizer_config.use_transformers:
             return TransformersTokenizer(self.tokenizer_config)
         return Tokenizer(self.tokenizer_config)
 
@@ -424,79 +445,64 @@ class PipelineConfiguration(FromParams):
 
 @dataclasses.dataclass
 class TrainerConfiguration:
-    """Creates a `TrainerConfiguration`
+    """Configures the training of a pipeline
 
-    Doc strings mainly provided by
+    It is passed on to the `Pipeline.train` method. Doc strings mainly provided by
     [AllenNLP](https://docs.allennlp.org/master/api/training/trainer/#gradientdescenttrainer-objects)
 
     Attributes
     ----------
-
-    optimizer: `Dict[str, Any]`, default `{"type": "adam"}`
+    optimizer
         [Pytorch optimizers](https://pytorch.org/docs/stable/optim.html)
         that can be constructed via the AllenNLP configuration framework
-
-    validation_metric: `str`, optional (default=-loss)
+    validation_metric
         Validation metric to measure for whether to stop training using patience
         and whether to serialize an is_best model each epoch.
         The metric name must be prepended with either "+" or "-",
         which specifies whether the metric is an increasing or decreasing function.
-
-    patience: `Optional[int]`, optional (default=2)
+    patience
         Number of epochs to be patient before early stopping:
         the training is stopped after `patience` epochs with no improvement.
         If given, it must be > 0. If `None`, early stopping is disabled.
-
-    num_epochs: `int`, optional (default=20)
+    num_epochs
         Number of training epochs
-
-    cuda_device: `int`, optional (default=-1)
+    cuda_device
         An integer specifying the CUDA device to use for this process. If -1, the CPU is used.
-
-    grad_norm: `Optional[float]`, optional
+        By default (None) we will automatically use a CUDA device if one is available.
+    grad_norm
         If provided, gradient norms will be rescaled to have a maximum of this value.
-
-    grad_clipping: `Optional[float]`, optional
+    grad_clipping
         If provided, gradients will be clipped during the backward pass to have an (absolute) maximum of this value.
         If you are getting `NaN`s in your gradients during training that are not solved by using grad_norm,
         you may need this.
-
-    learning_rate_scheduler: `Optional[Dict[str, Any]]`, optional
+    learning_rate_scheduler
         If specified, the learning rate will be decayed with respect to this schedule at the end of each epoch
         (or batch, if the scheduler implements the step_batch method).
         If you use `torch.optim.lr_scheduler.ReduceLROnPlateau`, this will use the `validation_metric` provided
         to determine if learning has plateaued.
-
-    momentum_scheduler: `Optional[Dict[str, Any]]`, optional
+    momentum_scheduler
         If specified, the momentum will be updated at the end of each batch or epoch according to the schedule.
-
-    moving_average: `Optional[Dict[str, Any]]`, optional
+    moving_average
         If provided, we will maintain moving averages for all parameters.
         During training, we employ a shadow variable for each parameter, which maintains the moving average.
         During evaluation, we backup the original parameters and assign the moving averages to corresponding parameters.
         Be careful that when saving the checkpoint, we will save the moving averages of parameters.
         This is necessary because we want the saved model to perform as well as the validated model if we load it later.
-
-    batch_size: `Optional[int]`, optional (default=16)
+    batch_size
         Size of the batch.
-
-    data_bucketing: `bool`, optional (default=False)
+    data_bucketing
         If enabled, try to apply data bucketing over training batches.
-
     batches_per_epoch
         Determines the number of batches after which a training epoch ends.
         If the number is smaller than the total amount of batches in your training data,
         the second "epoch" will take off where the first "epoch" ended.
         If this is `None`, then an epoch is set to be one full pass through your training data.
         This is useful if you want to evaluate your data more frequently on your validation data set during training.
-
     random_seed
-        Seed for the underlying random number generator.
+        Seed for the underlying random number generators.
         If None, we take the random seeds provided by AllenNLP's `prepare_environment` method.
-
     use_amp
         If `True`, we'll train using [Automatic Mixed Precision](https://pytorch.org/docs/stable/amp.html).
-
     num_serialized_models_to_keep
         Number of previous model checkpoints to retain.  Default is to keep 1 checkpoint.
         A value of None or -1 means all checkpoints will be kept.
@@ -508,7 +514,7 @@ class TrainerConfiguration:
     validation_metric: str = "-loss"
     patience: Optional[int] = 2
     num_epochs: int = 20
-    cuda_device: int = None
+    cuda_device: Optional[int] = None
     grad_norm: Optional[float] = None
     grad_clipping: Optional[float] = None
     learning_rate_scheduler: Optional[Dict[str, Any]] = None
