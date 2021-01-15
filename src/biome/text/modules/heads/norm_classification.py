@@ -81,6 +81,8 @@ class NORMClassification(TaskHead):
     ) -> None:
         super(NORMClassification, self).__init__(backbone)
 
+
+
         if label_encoding not in ["BIOUL", "BIO"]:
             raise WrongValueError(
                 f"Label encoding {label_encoding} not supported. Allowed values are {['BIOUL', 'BIO']}"
@@ -354,9 +356,9 @@ class NORMClassification(TaskHead):
 
             output.loss =  output.labels_loss + output.threeDs_loss + output.fourD_loss + output.bgh_loss
             
-            #TODO: preguntar a David por esto
+            #TODO: x4
             for metric in self.__all_metrics:
-                metric(class_probabilities, tags, mask)
+                metric(class_probabilities_labels, tags, mask)
 
         return output
 
@@ -368,6 +370,8 @@ class NORMClassification(TaskHead):
             [vocabulary.label_for_index(self.backbone.vocab, idx) for idx in tags]
             for tags, score in viterbi_paths["labels_viterbi_paths"]
         ]
+
+        #TODO: viterbi paths no tienen mucho sentido sino son labels
         threeDs_tags = [
             [vocabulary.label_for_index(self.backbone.vocab, idx) for idx in tags]
             for tags, score in viterbi_paths["threeDs_viterbi_paths"]

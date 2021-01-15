@@ -10,9 +10,7 @@ from biome.text import VocabularyConfiguration
 from biome.text import vocabulary
 from biome.text.modules.heads import TaskOutput
 
-# Disabling wandb, sometimes messes with the stdout
-import os
-os.environ["WANDB_MODE"] = "disabled"
+
 
 @pytest.fixture
 def training_dataset() -> Dataset:
@@ -87,5 +85,16 @@ def test_vocab_creation(pipeline_dict):
     assert pipeline.vocab.get_vocab_size("3D_tags") == len(pipeline_dict["head"]["threeDs"])
     assert pipeline.vocab.get_vocab_size("4D_tags") == len(pipeline_dict["head"]["fourD"])
     assert pipeline.vocab.get_vocab_size("bgh_tags") == len(pipeline_dict["head"]["bgh"])
-    
-    
+
+
+def test_forward_head(pipeline_dict, training_dataset):
+    from allennlp.data import Batch
+
+    pl = Pipeline.from_config(pipeline_dict)
+
+    instance = pl.head.featurize(text=training_dataset["text"][0], entities=training_dataset["entities"][0])
+    batch = Batch([instance])
+    batch.index_instances(pl.vocab)
+
+    tensor_dict = batch.as_tensor_dict()
+    pl.head.forward(**tensor_dict)
