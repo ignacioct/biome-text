@@ -29,7 +29,8 @@ from biome.text.helpers import tags_from_offsets
 from biome.text.modules.configuration import ComponentConfiguration
 from biome.text.modules.configuration import FeedForwardConfiguration
 
-from ...errors import EmptyVocabError, WrongValueError
+from ...errors import EmptyVocabError
+from ...errors import WrongValueError
 from .task_head import TaskHead
 from .task_head import TaskName
 from .task_head import TaskOutput
@@ -81,8 +82,6 @@ class NORMClassification(TaskHead):
     ) -> None:
         super(NORMClassification, self).__init__(backbone)
 
-
-
         if label_encoding not in ["BIOUL", "BIO"]:
             raise WrongValueError(
                 f"Label encoding {label_encoding} not supported. Allowed values are {['BIOUL', 'BIO']}"
@@ -103,21 +102,18 @@ class NORMClassification(TaskHead):
             span_labels_to_tag_labels(labels, self._label_encoding),
         )
 
-        #Extending vocabulary for the medical codes
+        # Extending vocabulary for the medical codes
 
-        self.backbone.vocab.add_tokens_to_namespace(threeDs, namespace='3D_tags')
+        self.backbone.vocab.add_tokens_to_namespace(threeDs, namespace="3D_tags")
 
-        self.backbone.vocab.add_tokens_to_namespace(fourD, namespace='4D_tags')
+        self.backbone.vocab.add_tokens_to_namespace(fourD, namespace="4D_tags")
 
-        self.backbone.vocab.add_tokens_to_namespace(bgh, namespace='bgh_tags')
+        self.backbone.vocab.add_tokens_to_namespace(bgh, namespace="bgh_tags")
 
         self.dropout = torch.nn.Dropout(dropout)
 
         # output layers
-        self._classifier_input_dim = (
-            backbone.encoder.get_output_dim()
-        )
-
+        self._classifier_input_dim = backbone.encoder.get_output_dim()
 
         # we want this linear applied to each token in the sequence
         self._label_projection_layer = TimeDistributed(
@@ -129,11 +125,15 @@ class NORMClassification(TaskHead):
         )
 
         self._fourD_projection_layer_4D = TimeDistributed(
-            torch.nn.Linear(self._classifier_input_dim, len(fourD))     # 10 possible digits + 'O'
+            torch.nn.Linear(
+                self._classifier_input_dim, len(fourD)
+            )  # 10 possible digits + 'O'
         )
 
         self._bgh_projection_layer_BGH = TimeDistributed(
-            torch.nn.Linear(self._classifier_input_dim, len(bgh))     # 10 possible digits + 'O'
+            torch.nn.Linear(
+                self._classifier_input_dim, len(bgh)
+            )  # 10 possible digits + 'O'
         )
 
         constraints = allowed_transitions(
@@ -147,7 +147,6 @@ class NORMClassification(TaskHead):
 
         self.metrics = {"accuracy": CategoricalAccuracy()}
 
-
         self.f1_metric = SpanBasedF1Measure(
             self.backbone.vocab,
             tag_namespace=vocabulary.LABELS_NAMESPACE,
@@ -155,9 +154,7 @@ class NORMClassification(TaskHead):
         )
 
         self.__all_metrics = [self.f1_metric]
-        self.__all_metrics.extend(self.metrics.values()
-        
-        )
+        self.__all_metrics.extend(self.metrics.values())
 
     @property
     def span_labels(self) -> List[str]:
@@ -190,23 +187,23 @@ class NORMClassification(TaskHead):
             str, specific tumor type code. 10 possible values
         bgh
             str, composed of behaviour, grade and /H (or not) 6+9+1 possible values
-        
+
         Create an example Instance from token and tags.
         This function transforms tokens, wether or not input should be tokenized, and introduce it into an AllenNLP text field, whiech contains tokens.
         AllenNLP text field is introduced into an instances, used as output function
         """
-        
+
         # text is already pre-tokenized
         tokens = text
 
         instance = self.backbone.featurizer(
             tokens, to_field="text", tokenize=False, aggregate=True
         )
-        
-        #Adding labels & codes
+
+        # Adding labels & codes
         if self.training:
 
-            #Tagging
+            # Tagging
             assert tags, f"No tags found when training. Data [{tokens, tags}]"
             instance.add_field(
                 "tags",
@@ -217,83 +214,102 @@ class NORMClassification(TaskHead):
                 ),
             )
 
-            #3Ds
+            # 3Ds
             assert tags, f"No 3Ds codes found when training. Data [{tokens, threeDs}]"
             instance.add_field(
                 "threeDs",
                 SequenceLabelField(
                     threeDs,
                     sequence_field=cast(TextField, instance["text"]),
-                    label_namespace='3D_tags', 
+                    label_namespace="3D_tags",
                 ),
             )
 
-            #4D
+            # 4D
             assert tags, f"No 4D codes found when training. Data [{tokens, fourD}]"
             instance.add_field(
                 "fourD",
                 SequenceLabelField(
                     fourD,
                     sequence_field=cast(TextField, instance["text"]),
-                    label_namespace='4D_tags', 
+                    label_namespace="4D_tags",
                 ),
             )
 
-            #BGH
+            # BGH
             assert tags, f"No BGH codes found when training. Data [{tokens, bgh}]"
             instance.add_field(
                 "bgh",
                 SequenceLabelField(
                     bgh,
                     sequence_field=cast(TextField, instance["text"]),
-                    label_namespace='bgh_tags', 
+                    label_namespace="bgh_tags",
                 ),
             )
 
         return instance
 
+    def forward(
+        self,
+        text: TextFieldTensors,
+        raw_text: List[Union[str, List[str]]],
+        tags: torch.IntTensor = None,
+        threeDs: torch.IntTensor = None,
+        fourD: torch.IntTensor = None,
+        bgh: torch.IntTensor = None,
+    ) -> TaskOutput:
 
-    def forward(self, text: TextFieldTensors, raw_text: List[Union[str, List[str]]], tags: torch.IntTensor=None, threeDs: torch.IntTensor=None, fourD: torch.IntTensor=None, bgh: torch.IntTensor=None) -> TaskOutput:
-
-        mask = get_text_field_mask(text)    # returns a mask with 0 where the tokens are padding, and 1 otherwise.
-        embedded_text = self.dropout(self.backbone.forward(text, mask))     # applying dropout to text tensor and mask tensor
+        mask = get_text_field_mask(
+            text
+        )  # returns a mask with 0 where the tokens are padding, and 1 otherwise.
+        embedded_text = self.dropout(
+            self.backbone.forward(text, mask)
+        )  # applying dropout to text tensor and mask tensor
 
         # Creating feedforward layer if there is none
         if self._feedforward is not None:
             embedded_text = self._feedforward(embedded_text)
-        
+
         label_logits = self._label_projection_layer(embedded_text)
         threeDs_logits = self._threeDs_projection_layer(embedded_text)
         fourD_logits = self._fourD_projection_layer(embedded_text)
         bgh_logits = self._bgh_projection_layer(embedded_text)
-        
+
         # Viterbi paths
         # dims are: batch, top_k, (tag_sequence, viterbi_score)
-        viterbi_paths_labels: List[List[Tuple[List[int], float]]] = self._crf.viterbi_tags(
-            label_logits, mask, top_k=self.top_k
-        )
-        viterbi_paths_threeDs: List[List[Tuple[List[int], float]]] = self._crf.viterbi_tags(
-            threeDs_logits, mask, top_k=self.top_k
-        )
-        viterbi_paths_fourD: List[List[Tuple[List[int], float]]] = self._crf.viterbi_tags(
-            fourD_logits, mask, top_k=self.top_k
-        )
+        viterbi_paths_labels: List[
+            List[Tuple[List[int], float]]
+        ] = self._crf.viterbi_tags(label_logits, mask, top_k=self.top_k)
+        viterbi_paths_threeDs: List[
+            List[Tuple[List[int], float]]
+        ] = self._crf.viterbi_tags(threeDs_logits, mask, top_k=self.top_k)
+        viterbi_paths_fourD: List[
+            List[Tuple[List[int], float]]
+        ] = self._crf.viterbi_tags(fourD_logits, mask, top_k=self.top_k)
         viterbi_paths_bgh: List[List[Tuple[List[int], float]]] = self._crf.viterbi_tags(
             bgh_logits, mask, top_k=self.top_k
         )
 
         # Predicted tags
         # we just keep the best path for every instance
-        predicted_tags_labels: List[List[int]] = [paths[0][0] for paths in viterbi_paths_labels]
+        predicted_tags_labels: List[List[int]] = [
+            paths[0][0] for paths in viterbi_paths_labels
+        ]
         class_probabilities_labels = label_logits * 0.0
 
-        predicted_tags_threeDs: List[List[int]] = [paths[0][0] for paths in viterbi_paths_threeDs]
+        predicted_tags_threeDs: List[List[int]] = [
+            paths[0][0] for paths in viterbi_paths_threeDs
+        ]
         class_probabilities_threeDs = threeDs_logits * 0.0
 
-        predicted_tags_fourD: List[List[int]] = [paths[0][0] for paths in viterbi_paths_fourD]
+        predicted_tags_fourD: List[List[int]] = [
+            paths[0][0] for paths in viterbi_paths_fourD
+        ]
         class_probabilities_fourD = fourD_logits * 0.0
 
-        predicted_tags_bgh: List[List[int]] = [paths[0][0] for paths in viterbi_paths_bgh]
+        predicted_tags_bgh: List[List[int]] = [
+            paths[0][0] for paths in viterbi_paths_bgh
+        ]
         class_probabilities_bgh = bgh_logits * 0.0
 
         # Class probabilities assignation
@@ -314,116 +330,118 @@ class NORMClassification(TaskHead):
                 class_probabilities_bgh[i, j, tag_id] = 1
 
         output = TaskOutput(
-
-            #using dictionaries to merge all four outputs of each individual classifier into one variable
-            logits = {
+            # using dictionaries to merge all four outputs of each individual classifier into one variable
+            logits={
                 "labels_logits": label_logits,
                 "threeDs_logits": threeDs_logits,
                 "fourD_logits": fourD_logits,
-                "bgh_logits": bgh_logits
+                "bgh_logits": bgh_logits,
             },
-            probs = {
+            probs={
                 "labels_probabilities": class_probabilities_labels,
                 "threeDs_probabilities": class_probabilities_threeDs,
                 "fourD_probabilities": class_probabilities_fourD,
-                "bgh_probabilities": class_probabilities_bgh
+                "bgh_probabilities": class_probabilities_bgh,
             },
-
-            viterbi_paths = {
+            viterbi_paths={
                 "labels_viterbi_paths": viterbi_paths_labels,
                 "threeDs_viterbi_paths": viterbi_paths_threeDs,
                 "fourD_viterbi_paths": viterbi_paths_fourD,
-                "bgh_viterbi_paths": viterbi_paths_bgh
+                "bgh_viterbi_paths": viterbi_paths_bgh,
             },
-            
-            predicted_tags = {
+            predicted_tags={
                 "labels_predicted_tags": predicted_tags_labels,
                 "threeDs_predicted_tags": predicted_tags_threeDs,
                 "fourD_predicted_tags": predicted_tags_fourD,
-                "bgh_predicted_tags": predicted_tags_bgh
+                "bgh_predicted_tags": predicted_tags_bgh,
             },
-    
             # Common outputs
             mask=mask,
             raw_text=raw_text,
         )
 
-        if tags is not None and threeDs is not None and fourD is not None and bgh is not None:
+        if (
+            tags is not None
+            and threeDs is not None
+            and fourD is not None
+            and bgh is not None
+        ):
             output.labels_loss = self._loss(label_logits, tags, mask)
             output.threeDs_loss = self._loss(threeDs_logits, tags, mask)
             output.fourD_loss = self._loss(fourD_logits, tags, mask)
             output.bgh_loss = self._loss(bgh_logits, tags, mask)
 
-            output.loss =  output.labels_loss + output.threeDs_loss + output.fourD_loss + output.bgh_loss
-            
-            #TODO: x4
+            output.loss = (
+                output.labels_loss
+                + output.threeDs_loss
+                + output.fourD_loss
+                + output.bgh_loss
+            )
+
+            # TODO: x4
             for metric in self.__all_metrics:
                 metric(class_probabilities_labels, tags, mask)
 
         return output
 
-    def _decode_tags(self, viterbi_paths: Dict) -> Dict[List[str]]:
-        """
-        Decode pretokenized tags. It is divided in 4 lists of tags, and the output is combined into a dictionary
-        """
-        labels_tags = [
-            [vocabulary.label_for_index(self.backbone.vocab, idx) for idx in tags]
-            for tags, score in viterbi_paths["labels_viterbi_paths"]
-        ]
+    # def _decode_tags(self, viterbi_paths: Dict) -> Dict[List[str]]:
+    #     """
+    #     Decode pretokenized tags. It is divided in 4 lists of tags, and the output is combined into a dictionary
+    #     """
+    #     labels_tags = [
+    #         [vocabulary.label_for_index(self.backbone.vocab, idx) for idx in tags]
+    #         for tags, score in viterbi_paths["labels_viterbi_paths"]
+    #     ]
 
-        #TODO: viterbi paths no tienen mucho sentido sino son labels
-        threeDs_tags = [
-            [vocabulary.label_for_index(self.backbone.vocab, idx) for idx in tags]
-            for tags, score in viterbi_paths["threeDs_viterbi_paths"]
-        ]
-        fourD_tags = [
-            [vocabulary.label_for_index(self.backbone.vocab, idx) for idx in tags]
-            for tags, score in viterbi_paths["fourD_viterbi_paths"]
-        ]
-        bgh_tags = [
-            [vocabulary.label_for_index(self.backbone.vocab, idx) for idx in tags]
-            for tags, score in viterbi_paths["bgh_viterbi_paths"]
-        ]
+    #     #TODO: viterbi paths no tienen mucho sentido sino son labels
+    #     threeDs_tags = [
+    #         [vocabulary.label_for_index(self.backbone.vocab, idx) for idx in tags]
+    #         for tags, score in viterbi_paths["threeDs_viterbi_paths"]
+    #     ]
+    #     fourD_tags = [
+    #         [vocabulary.label_for_index(self.backbone.vocab, idx) for idx in tags]
+    #         for tags, score in viterbi_paths["fourD_viterbi_paths"]
+    #     ]
+    #     bgh_tags = [
+    #         [vocabulary.label_for_index(self.backbone.vocab, idx) for idx in tags]
+    #         for tags, score in viterbi_paths["bgh_viterbi_paths"]
+    #     ]
 
-        return {
-            "labels_decoded_tags": labels_tags,
-            "threeDs_decoded_tags": threeDs_tags,
-            "fourD_tags": fourD_tags,
-            "bgh_tags": bgh_tags
-        }
+    #     return {
+    #         "labels_decoded_tags": labels_tags,
+    #         "threeDs_decoded_tags": threeDs_tags,
+    #         "fourD_tags": fourD_tags,
+    #         "bgh_tags": bgh_tags
+    #     }
 
-    def _decode_entities(
-        self,
-        doc: Doc,
-        k_tags: List[List[str]],
-        pre_tokenized: bool,
-    ) -> Dict[List[Dict]]:
-        """Decode predicted entities from tags."""
-        return [
-            offsets_from_tags(
-                doc, tags, self._label_encoding, only_token_spans=pre_tokenized
-            )
-            for tags in k_tags
-        ]
+    # def _decode_entities(
+    #     self,
+    #     doc: Doc,
+    #     k_tags: List[List[str]],
+    #     pre_tokenized: bool,
+    # ) -> Dict[List[Dict]]:
+    #     """Decode predicted entities from tags."""
+    #     return [
+    #         offsets_from_tags(
+    #             doc, tags, self._label_encoding, only_token_spans=pre_tokenized
+    #         )
+    #         for tags in k_tags
+    #     ]
 
-    def _decode_tokens(self, doc: Doc) -> List[Dict]:
-        """Decode tokens"""
-        return [
-            {"text": token.text, "start": token.idx, "end": token.idx + len(token)}
-            for token in doc
-        ]
+    # def _decode_tokens(self, doc: Doc) -> List[Dict]:
+    #     """Decode tokens"""
+    #     return [
+    #         {"text": token.text, "start": token.idx, "end": token.idx + len(token)}
+    #         for token in doc
+    #     ]
 
-    def decode(self, output: TaskOutput) -> TaskOutput:
-        """Decoding tags, entities and tokens, thus forging the output"""
+    # def decode(self, output: TaskOutput) -> TaskOutput:
+    #     """Decoding tags, entities and tokens, thus forging the output"""
 
-        #TODO: preguntar a David sobre el problema lista/diccionario
-        output.tags = [
-            self._decode_tags(paths) for paths in output.viterbi_paths
-        ]
-        output.scores= [
-            [score for tags, score in paths] for paths in output.viterbi_paths
-        ]
-
-
-
-        
+    #     #TODO: preguntar a David sobre el problema lista/diccionario
+    #     output.tags = [
+    #         self._decode_tags(paths) for paths in output.viterbi_paths
+    #     ]
+    #     output.scores= [
+    #         [score for tags, score in paths] for paths in output.viterbi_paths
+    #     ]
