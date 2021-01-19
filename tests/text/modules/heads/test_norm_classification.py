@@ -14,41 +14,28 @@ from biome.text.modules.heads import TaskOutput
 @pytest.fixture
 def training_dataset() -> Dataset:
     """Dummy dataset, similar to CANTEMIST-NORM task"""
+
     df = pd.DataFrame(
         {
-            "text_org": "Prueba uno",
+            "text_org": [
+                "Prueba uno",
+                "Test dos",
+            ],
             "text": [
-                "Prueba",
-                "uno",
+                ["Prueba", "uno"],
+                ["Test", "dos"],
             ],
             "labels": [
-                "B-MORFOLOGIA_NEOPLASIA",
-                "L-MORFOLOGIA_NEOPLASIA",
+                [
+                    "B-MORFOLOGIA_NEOPLASIA",
+                    "L-MORFOLOGIA_NEOPLASIA",
+                ],
+                ["O", "O"],
             ],
-            "file": "cc_onco1.txt",
-            "sentence_offset": 0,
-            "code": [
-                "8041/3\n",
-                "8041/3\n",
-            ],
-        },
-        {
-            "text_org": "Test dos",
-            "text": [
-                "Test",
-                "dos",
-            ],
-            "labels": [
-                "O",
-                "O",
-            ],
-            "file": "cc_onco1.txt",
-            "sentence_offset": 2,
-            "code": [
-                "O",
-                "O",
-            ],
-        },
+            "file": ["cc_onco1.txt", "cc_onco1.txt"],
+            "sentence_offset": [0, 2],
+            "code": [["8041/3\n", "8041/3\n"], ["O", "O"]],
+        }
     )
 
     return Dataset.from_pandas(df)
@@ -95,14 +82,18 @@ def test_vocab_creation(pipeline_dict):
 
 
 def test_forward_head(pipeline_dict, training_dataset):
-    """from allennlp.data import Batch
+    from allennlp.data import Batch
 
     pl = Pipeline.from_config(pipeline_dict)
 
-    instance = pl.head.featurize(text=training_dataset["text"][0], entities=training_dataset["entities"][0])
+    instance = pl.head.featurize(
+        text=training_dataset["text"][0],
+        tags=training_dataset["labels"][0],
+        medical_codes=training_dataset["code"][0],
+    )
     batch = Batch([instance])
     batch.index_instances(pl.vocab)
 
     tensor_dict = batch.as_tensor_dict()
-    pl.head.forward(**tensor_dict)"""
-    assert True
+    pl.head.forward(**tensor_dict)
+    assert False

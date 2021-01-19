@@ -168,9 +168,7 @@ class NORMClassification(TaskHead):
         self,
         text: Union[str, List[str]],
         tags: Optional[Union[List[str], List[int]]] = None,
-        threeDs: Optional[str] = None,
-        fourD: Optional[str] = None,
-        bgh: Optional[str] = None,
+        medical_codes: Optional[str] = None,
     ) -> Optional[Instance]:
 
         """
@@ -199,6 +197,36 @@ class NORMClassification(TaskHead):
         instance = self.backbone.featurizer(
             tokens, to_field="text", tokenize=False, aggregate=True
         )
+
+        # Declaring lists of 3Ds, 4Ds and BGHs
+        threeDs = []
+        fourD = []
+        bgh = []
+
+        # Dividing the medical code into 3Ds, 4D and BGH
+        for medical_code in medical_codes:
+            if medical_code == "O":
+                threeDs.append("O")
+                fourD.append("O")
+                bgh.append("O")
+            else:
+                threeDs_code = medical_code.split(" ")[0]
+                threeDs_code = threeDs_code.replace("\n", "").split("/")[0]
+                threeDs.append(threeDs_code[0:3])
+                fourD.append(threeDs_code[3])
+
+                bgh_code = medical_code.split(" ")[0]
+                bgh_code = bgh_code.replace("\n", "").split("\t")[0].split("/")
+
+                if len(bgh_code) == 2:
+                    bgh.append(bgh_code[1])
+                elif len(bgh_code) == 3:
+                    separator = ""
+                    bgh.append(separator.join(bgh_code[-2:]))
+                else:
+                    raise Exception(
+                        "Unexpected bgh code in the medical code ", medical_code
+                    )
 
         # Adding labels & codes
         if self.training:
