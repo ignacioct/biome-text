@@ -60,6 +60,12 @@ def pipeline_dict() -> Dict:
     return pipeline_dict
 
 
+def convert_list_to_string(org_list, separator=""):
+    """Convert list to string, by joining all item in list with given separator.
+    Returns the concatenated string"""
+    return separator.join(org_list)
+
+
 def test_pipeline_creation(pipeline_dict):
     """Tests the correct creation of the pipeline with NORM task head"""
     assert Pipeline.from_config(pipeline_dict)
@@ -78,6 +84,40 @@ def test_vocab_creation(pipeline_dict):
     )
     assert pipeline.vocab.get_vocab_size("bgh_tags") == len(
         pipeline_dict["head"]["bgh"]
+    )
+
+
+def test_featurize(pipeline_dict, training_dataset):
+    """Test the correct working of the featurize process, which creates an instance from the training_dataset"""
+    pl = Pipeline.from_config(pipeline_dict)
+
+    instance = pl.head.featurize(
+        text=training_dataset["text"][0],
+        tags=training_dataset["labels"][0],
+        medical_codes=training_dataset["code"][0],
+    )
+    # Obtaining medical codes separated from the dataset
+    threeD_test = "804"
+    fourD_test = "1"
+    bgh_test = "3"
+
+    assert [token.text for token in instance["text"].tokens] == training_dataset[
+        "text"
+    ][0]
+    assert [label for label in instance["tags"].labels] == training_dataset["labels"][0]
+
+    # As we have two words, the code is duplicated, so we compare with the first element of the list
+    assert (
+        convert_list_to_string([label for label in instance["threeDs"].labels[0]])
+        == threeD_test
+    )  # as we have two words, the code is duplicated, so we compare with the first element of the list
+    assert (
+        convert_list_to_string([label for label in instance["fourD"].labels[0]])
+        == fourD_test
+    )
+    assert (
+        convert_list_to_string([label for label in instance["bgh"].labels[0]])
+        == bgh_test
     )
 
 
