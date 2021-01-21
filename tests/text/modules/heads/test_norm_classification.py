@@ -60,6 +60,13 @@ def pipeline_dict() -> Dict:
     return pipeline_dict
 
 
+@pytest.fixture
+def example_medical_codes() -> Dict:
+    """A dictionary with the medical codes presente in the example dataset, for assertion purposes"""
+    test_medical_codes = {"threeDs": "804", "fourD": "1", "bgh": "3"}
+    return test_medical_codes
+
+
 def convert_list_to_string(org_list, separator=""):
     """Convert list to string, by joining all item in list with given separator.
     Returns the concatenated string"""
@@ -87,7 +94,7 @@ def test_vocab_creation(pipeline_dict):
     )
 
 
-def test_featurize(pipeline_dict, training_dataset):
+def test_featurize(pipeline_dict, training_dataset, example_medical_codes):
     """Test the correct working of the featurize process, which creates an instance from the training_dataset"""
     pl = Pipeline.from_config(pipeline_dict)
 
@@ -96,10 +103,6 @@ def test_featurize(pipeline_dict, training_dataset):
         tags=training_dataset["labels"][0],
         medical_codes=training_dataset["code"][0],
     )
-    # Obtaining medical codes separated from the dataset
-    threeD_test = "804"
-    fourD_test = "1"
-    bgh_test = "3"
 
     assert [token.text for token in instance["text"].tokens] == training_dataset[
         "text"
@@ -109,15 +112,15 @@ def test_featurize(pipeline_dict, training_dataset):
     # As we have two words, the code is duplicated, so we compare with the first element of the list
     assert (
         convert_list_to_string([label for label in instance["threeDs"].labels[0]])
-        == threeD_test
+        == example_medical_codes["threeDs"]
     )  # as we have two words, the code is duplicated, so we compare with the first element of the list
     assert (
         convert_list_to_string([label for label in instance["fourD"].labels[0]])
-        == fourD_test
+        == example_medical_codes["fourD"]
     )
     assert (
         convert_list_to_string([label for label in instance["bgh"].labels[0]])
-        == bgh_test
+        == example_medical_codes["bgh"]
     )
 
 
