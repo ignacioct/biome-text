@@ -167,6 +167,7 @@ class NORMClassification(TaskHead):
     def featurize(
         self,
         text: Union[str, List[str]],
+        raw_text: List[Union[str, List[str]]],
         tags: Optional[Union[List[str], List[int]]] = None,
         medical_codes: Optional[str] = None,
     ) -> Optional[Instance]:
@@ -274,6 +275,8 @@ class NORMClassification(TaskHead):
                     label_namespace="bgh_tags",
                 ),
             )
+
+            instance.add_field("raw_text", MetadataField(raw_text))
 
         return instance
 
@@ -406,9 +409,11 @@ class NORMClassification(TaskHead):
                 + output.bgh_loss
             )
 
-            # TODO: x4
+            # NER-F1 metrics
             for metric in self.__all_metrics:
                 metric(class_probabilities_labels, tags, mask)
+
+            # TODO: include metrics for NORM parts
 
         return output
 

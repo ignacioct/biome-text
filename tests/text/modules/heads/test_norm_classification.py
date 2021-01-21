@@ -49,7 +49,9 @@ def pipeline_dict() -> Dict:
         "features": {"word": {"embedding_dim": 2}},
         "head": {
             "type": "NORMClassification",
-            "labels": ["NER"],
+            "labels": [
+                "MORFOLOGIA_NEOPLASIA",
+            ],
             "label_encoding": "BIOUL",
             "threeDs": ["O", "804"],
             "fourD": ["O", "1"],
@@ -100,6 +102,7 @@ def test_featurize(pipeline_dict, training_dataset, example_medical_codes):
 
     instance = pl.head.featurize(
         text=training_dataset["text"][0],
+        raw_text=training_dataset["text_org"][0],
         tags=training_dataset["labels"][0],
         medical_codes=training_dataset["code"][0],
     )
@@ -124,19 +127,23 @@ def test_featurize(pipeline_dict, training_dataset, example_medical_codes):
     )
 
 
-def test_forward_head(pipeline_dict, training_dataset):
+def test_batch(pipeline_dict, training_dataset):
     from allennlp.data import Batch
 
     pl = Pipeline.from_config(pipeline_dict)
 
     instance = pl.head.featurize(
         text=training_dataset["text"][0],
+        raw_text=training_dataset["text_org"][0],
         tags=training_dataset["labels"][0],
         medical_codes=training_dataset["code"][0],
     )
+
     batch = Batch([instance])
     batch.index_instances(pl.vocab)
 
     tensor_dict = batch.as_tensor_dict()
-    pl.head.forward(**tensor_dict)
-    assert False
+    batch._check_types()
+
+    # pl.head.forward(**tensor_dict)
+    # assert False
