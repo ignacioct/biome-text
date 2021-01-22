@@ -79,6 +79,7 @@ class NORMClassification(TaskHead):
         bgh: List[str],
         label_encoding: Optional[str] = "BIOUL",
         dropout: Optional[float] = 0.0,
+        feedforward: Optional[FeedForwardConfiguration] = None,
     ) -> None:
         super(NORMClassification, self).__init__(backbone)
 
@@ -124,13 +125,13 @@ class NORMClassification(TaskHead):
             torch.nn.Linear(self._classifier_input_dim, len(threeDs))
         )
 
-        self._fourD_projection_layer_4D = TimeDistributed(
+        self._fourD_projection_layer = TimeDistributed(
             torch.nn.Linear(
                 self._classifier_input_dim, len(fourD)
             )  # 10 possible digits + 'O'
         )
 
-        self._bgh_projection_layer_BGH = TimeDistributed(
+        self._bgh_projection_layer = TimeDistributed(
             torch.nn.Linear(
                 self._classifier_input_dim, len(bgh)
             )  # 10 possible digits + 'O'
@@ -155,6 +156,12 @@ class NORMClassification(TaskHead):
 
         self.__all_metrics = [self.f1_metric]
         self.__all_metrics.extend(self.metrics.values())
+
+        self._feedforward: FeedForward = (
+            None
+            if not feedforward
+            else feedforward.input_dim(backbone.encoder.get_output_dim()).compile()
+        )
 
     @property
     def span_labels(self) -> List[str]:
@@ -310,16 +317,20 @@ class NORMClassification(TaskHead):
         # dims are: batch, top_k, (tag_sequence, viterbi_score)
         viterbi_paths_labels: List[
             List[Tuple[List[int], float]]
-        ] = self._crf.viterbi_tags(label_logits, mask, top_k=self.top_k)
-        viterbi_paths_threeDs: List[
-            List[Tuple[List[int], float]]
-        ] = self._crf.viterbi_tags(threeDs_logits, mask, top_k=self.top_k)
-        viterbi_paths_fourD: List[
-            List[Tuple[List[int], float]]
-        ] = self._crf.viterbi_tags(fourD_logits, mask, top_k=self.top_k)
-        viterbi_paths_bgh: List[List[Tuple[List[int], float]]] = self._crf.viterbi_tags(
-            bgh_logits, mask, top_k=self.top_k
-        )
+        ] = self._crf.viterbi_tags(
+            label_logits, mask
+        )  # top_k doesnt need to be added
+
+        # TODO: viterbi solo para labels, añadir
+        # viterbi_paths_threeDs: List[
+        #     List[Tuple[List[int], float]]
+        # ] = self._crf.viterbi_tags(threeDs_logits, mask)
+        # viterbi_paths_fourD: List[
+        #     List[Tuple[List[int], float]]
+        # ] = self._crf.viterbi_tags(fourD_logits, mask)
+        # viterbi_paths_bgh: List[List[Tuple[List[int], float]]] = self._crf.viterbi_tags(
+        #     bgh_logits, mask
+        # )
 
         # Predicted tags
         # we just keep the best path for every instance

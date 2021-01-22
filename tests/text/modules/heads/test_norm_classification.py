@@ -15,6 +15,7 @@ from biome.text.modules.heads import TaskOutput
 def training_dataset() -> Dataset:
     """Dummy dataset, similar to CANTEMIST-NORM task"""
 
+    # TODO: quitar raw
     df = pd.DataFrame(
         {
             "text_org": [
@@ -147,3 +148,24 @@ def test_batch(pipeline_dict, training_dataset):
 
     # pl.head.forward(**tensor_dict)
     # assert False
+
+
+def test_forward(pipeline_dict, training_dataset):
+    from allennlp.data import Batch
+
+    pl = Pipeline.from_config(pipeline_dict)
+
+    instance = pl.head.featurize(
+        text=training_dataset["text"][0],
+        raw_text=training_dataset["text_org"][0],
+        tags=training_dataset["labels"][0],
+        medical_codes=training_dataset["code"][0],
+    )
+
+    batch = Batch([instance])
+    batch.index_instances(pl.vocab)
+
+    tensor_dict = batch.as_tensor_dict()
+
+    pl.head.forward(**tensor_dict)
+    assert False
