@@ -146,16 +146,24 @@ class NORMClassification(TaskHead):
             self.num_labels, constraints, include_start_end_transitions=True
         )
 
-        self.metrics = {"accuracy": CategoricalAccuracy()}
-
-        self.f1_metric = SpanBasedF1Measure(
+        self.span_based_f1_metric = SpanBasedF1Measure(
             self.backbone.vocab,
             tag_namespace=vocabulary.LABELS_NAMESPACE,
             label_encoding=self._label_encoding,
         )
 
-        self.__all_metrics = [self.f1_metric]
-        self.__all_metrics.extend(self.metrics.values())
+        self.metrics = {
+            "accuracy": CategoricalAccuracy(),
+            "span_based_f1": self.f1_metric,
+        }
+
+        (
+            self._threeDs_loss,
+            self._fourD_loss,
+            self._bgh_loss,
+        ) = torch.nn.CrossEntropyLoss()
+
+        self._loss = torch.nn.BCEWithLogitsLoss()
 
         self._feedforward: FeedForward = (
             None
@@ -313,6 +321,10 @@ class NORMClassification(TaskHead):
         fourD_logits = self._fourD_projection_layer(embedded_text)
         bgh_logits = self._bgh_projection_layer(embedded_text)
 
+        """
+        NER-classification
+        """
+
         # Viterbi paths
         # dims are: batch, top_k, (tag_sequence, viterbi_score)
         viterbi_paths_labels: List[
@@ -321,56 +333,31 @@ class NORMClassification(TaskHead):
             label_logits, mask
         )  # top_k doesnt need to be added
 
-        # TODO: viterbi solo para labels, añadir
-        # viterbi_paths_threeDs: List[
-        #     List[Tuple[List[int], float]]
-        # ] = self._crf.viterbi_tags(threeDs_logits, mask)
-        # viterbi_paths_fourD: List[
-        #     List[Tuple[List[int], float]]
-        # ] = self._crf.viterbi_tags(fourD_logits, mask)
-        # viterbi_paths_bgh: List[List[Tuple[List[int], float]]] = self._crf.viterbi_tags(
-        #     bgh_logits, mask
-        # )
-
-        # Predicted tags
         # we just keep the best path for every instance
         predicted_tags_labels: List[List[int]] = [
             paths[0][0] for paths in viterbi_paths_labels
         ]
         class_probabilities_labels = label_logits * 0.0
 
-        predicted_tags_threeDs: List[List[int]] = [
-            paths[0][0] for paths in viterbi_paths_threeDs
-        ]
-        class_probabilities_threeDs = threeDs_logits * 0.0
-
-        predicted_tags_fourD: List[List[int]] = [
-            paths[0][0] for paths in viterbi_paths_fourD
-        ]
-        class_probabilities_fourD = fourD_logits * 0.0
-
-        predicted_tags_bgh: List[List[int]] = [
-            paths[0][0] for paths in viterbi_paths_bgh
-        ]
-        class_probabilities_bgh = bgh_logits * 0.0
-
-        # Class probabilities assignation
         for i, instance_tags in enumerate(predicted_tags_labels):
             for j, tag_id in enumerate(instance_tags):
                 class_probabilities_labels[i, j, tag_id] = 1
 
-        for i, instance_tags in enumerate(predicted_tags_threeDs):
-            for j, tag_id in enumerate(instance_tags):
-                class_probabilities_threeDs[i, j, tag_id] = 1
+        """
+        Medical-codes classification
+        """
 
-        for i, instance_tags in enumerate(predicted_tags_fourD):
-            for j, tag_id in enumerate(instance_tags):
-                class_probabilities_fourD[i, j, tag_id] = 1
+        threeDs_loss = self._threeDs_loss(threeDs_logits, threeDs)
+        fourD_loss = self._fourD_loss(threeDs_logits, threeDs)
+        bgh_loss = self._bgh_loss(threeDs_logits, threeDs)
 
-        for i, instance_tags in enumerate(predicted_tags_bgh):
-            for j, tag_id in enumerate(instance_tags):
-                class_probabilities_bgh[i, j, tag_id] = 1
+        class_probabilities_threeDs = threeDs_logits * 0.0
 
+        class_probabilities_fourD = fourD_logits * 0.0
+
+        class_probabilities_bgh = bgh_logits * 0.0
+
+        # Task Output
         output = TaskOutput(
             # using dictionaries to merge all four outputs of each individual classifier into one variable
             logits={
@@ -387,15 +374,9 @@ class NORMClassification(TaskHead):
             },
             viterbi_paths={
                 "labels_viterbi_paths": viterbi_paths_labels,
-                "threeDs_viterbi_paths": viterbi_paths_threeDs,
-                "fourD_viterbi_paths": viterbi_paths_fourD,
-                "bgh_viterbi_paths": viterbi_paths_bgh,
             },
             predicted_tags={
                 "labels_predicted_tags": predicted_tags_labels,
-                "threeDs_predicted_tags": predicted_tags_threeDs,
-                "fourD_predicted_tags": predicted_tags_fourD,
-                "bgh_predicted_tags": predicted_tags_bgh,
             },
             # Common outputs
             mask=mask,
@@ -409,9 +390,9 @@ class NORMClassification(TaskHead):
             and bgh is not None
         ):
             output.labels_loss = self._loss(label_logits, tags, mask)
-            output.threeDs_loss = self._loss(threeDs_logits, tags, mask)
-            output.fourD_loss = self._loss(fourD_logits, tags, mask)
-            output.bgh_loss = self._loss(bgh_logits, tags, mask)
+            output.threeDs_loss = threeDs_loss
+            output.fourD_loss = fourD_loss
+            output.bgh_loss = bgh_loss
 
             output.loss = (
                 output.labels_loss
@@ -421,10 +402,13 @@ class NORMClassification(TaskHead):
             )
 
             # NER-F1 metrics
-            for metric in self.__all_metrics:
+            for metric in self.metrics["span_based_f1"]:
                 metric(class_probabilities_labels, tags, mask)
 
+            # Combining medical codes into a string
+
             # TODO: include metrics for NORM parts
+            # TODO: colapsar los tres codigos en uno, y aplicar F1 de clasificacion
 
         return output
 
