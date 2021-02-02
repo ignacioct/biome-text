@@ -18,6 +18,7 @@ from allennlp.modules import TimeDistributed
 from allennlp.modules.conditional_random_field import allowed_transitions
 from allennlp.nn.util import get_text_field_mask
 from allennlp.training.metrics import CategoricalAccuracy
+from allennlp.training.metrics import FBetaMeasure
 from allennlp.training.metrics import SpanBasedF1Measure
 from spacy.tokens.doc import Doc
 
@@ -33,7 +34,6 @@ from ...errors import EmptyVocabError
 from ...errors import WrongValueError
 from .task_head import TaskHead
 from .task_head import TaskName
-from .task_head import TaskOutput
 
 
 class NORMClassification(TaskHead):
@@ -80,6 +80,7 @@ class NORMClassification(TaskHead):
         label_encoding: Optional[str] = "BIOUL",
         dropout: Optional[float] = 0.0,
         feedforward: Optional[FeedForwardConfiguration] = None,
+        top_k: int = None,
     ) -> None:
         super(NORMClassification, self).__init__(backbone)
 
@@ -94,6 +95,13 @@ class NORMClassification(TaskHead):
         self._threeDs: threeDs
         self._fourD: fourD
         self._bgh: bgh
+
+        # Top-k
+        if top_k is None:
+            self.top_k = 1
+            self.flatten_output = True
+        else:
+            self.flatten_output = False
 
         vocabulary.set_labels(
             self.backbone.vocab,
@@ -146,24 +154,18 @@ class NORMClassification(TaskHead):
             self.num_labels, constraints, include_start_end_transitions=True
         )
 
+        self.metrics = {"accuracy": CategoricalAccuracy()}
+
         self.span_based_f1_metric = SpanBasedF1Measure(
             self.backbone.vocab,
             tag_namespace=vocabulary.LABELS_NAMESPACE,
             label_encoding=self._label_encoding,
         )
 
-        self.metrics = {
-            "accuracy": CategoricalAccuracy(),
-            "span_based_f1": self.f1_metric,
-        }
+        self.__all_metrics = [self.span_based_f1_metric]
+        self.__all_metrics.extend(self.metrics.values())
 
-        (
-            self._threeDs_loss,
-            self._fourD_loss,
-            self._bgh_loss,
-        ) = torch.nn.CrossEntropyLoss()
-
-        self._loss = torch.nn.BCEWithLogitsLoss()
+        self.f1_code = FBetaMeasure(average="micro")  # Metric for the medical codes
 
         self._feedforward: FeedForward = (
             None
@@ -171,11 +173,40 @@ class NORMClassification(TaskHead):
             else feedforward.input_dim(backbone.encoder.get_output_dim()).compile()
         )
 
+        # Matrix with final medical codes, created dinamically
+        self.medical_codes = []
+
+        for threeD in threeDs:
+            if threeD == "O":
+                self.medical_codes.append("O")
+            else:
+                for fourd in fourD:
+                    for bg in bgh:
+                        self.medical_codes.append(threeD + "&" + fourd + "&" + bg)
+
+        # This funtion must only be used with micro-average
+
     @property
     def span_labels(self) -> List[str]:
         return self._span_labels
 
     def _loss(self, logits: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor):
+        """loss is calculated as -log_likelihood from crf"""
+        return -1 * self._crf(logits, labels, mask)
+
+    def _threeDs_loss(
+        self, logits: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor
+    ):
+        """loss is calculated as -log_likelihood from crf"""
+        return -1 * self._crf(logits, labels, mask)
+
+    def _fourD_loss(
+        self, logits: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor
+    ):
+        """loss is calculated as -log_likelihood from crf"""
+        return -1 * self._crf(logits, labels, mask)
+
+    def _bgh_loss(self, logits: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor):
         """loss is calculated as -log_likelihood from crf"""
         return -1 * self._crf(logits, labels, mask)
 
@@ -303,7 +334,7 @@ class NORMClassification(TaskHead):
         threeDs: torch.IntTensor = None,
         fourD: torch.IntTensor = None,
         bgh: torch.IntTensor = None,
-    ) -> TaskOutput:
+    ) -> dict:
 
         mask = get_text_field_mask(
             text
@@ -327,12 +358,10 @@ class NORMClassification(TaskHead):
 
         # Viterbi paths
         # dims are: batch, top_k, (tag_sequence, viterbi_score)
+
         viterbi_paths_labels: List[
             List[Tuple[List[int], float]]
-        ] = self._crf.viterbi_tags(
-            label_logits, mask
-        )  # top_k doesnt need to be added
-
+        ] = self._crf.viterbi_tags(label_logits, mask, top_k=self.top_k)
         # we just keep the best path for every instance
         predicted_tags_labels: List[List[int]] = [
             paths[0][0] for paths in viterbi_paths_labels
@@ -347,10 +376,6 @@ class NORMClassification(TaskHead):
         Medical-codes classification
         """
 
-        threeDs_loss = self._threeDs_loss(threeDs_logits, threeDs)
-        fourD_loss = self._fourD_loss(threeDs_logits, threeDs)
-        bgh_loss = self._bgh_loss(threeDs_logits, threeDs)
-
         class_probabilities_threeDs = threeDs_logits * 0.0
 
         class_probabilities_fourD = fourD_logits * 0.0
@@ -358,7 +383,7 @@ class NORMClassification(TaskHead):
         class_probabilities_bgh = bgh_logits * 0.0
 
         # Task Output
-        output = TaskOutput(
+        output = dict(
             # using dictionaries to merge all four outputs of each individual classifier into one variable
             logits={
                 "labels_logits": label_logits,
@@ -366,6 +391,8 @@ class NORMClassification(TaskHead):
                 "fourD_logits": fourD_logits,
                 "bgh_logits": bgh_logits,
             },
+            # TODO: eliminar para que no se calculen en todos los pasos cuando se entrena
+            # Probabilities are only useful on predictions
             probs={
                 "labels_probabilities": class_probabilities_labels,
                 "threeDs_probabilities": class_probabilities_threeDs,
@@ -379,7 +406,6 @@ class NORMClassification(TaskHead):
                 "labels_predicted_tags": predicted_tags_labels,
             },
             # Common outputs
-            mask=mask,
             raw_text=raw_text,
         )
 
@@ -389,6 +415,11 @@ class NORMClassification(TaskHead):
             and fourD is not None
             and bgh is not None
         ):
+
+            threeDs_loss = self._threeDs_loss(threeDs_logits, threeDs, mask)
+            fourD_loss = self._fourD_loss(threeDs_logits, fourD, mask)
+            bgh_loss = self._bgh_loss(threeDs_logits, bgh, mask)
+
             output.labels_loss = self._loss(label_logits, tags, mask)
             output.threeDs_loss = threeDs_loss
             output.fourD_loss = fourD_loss
@@ -402,15 +433,73 @@ class NORMClassification(TaskHead):
             )
 
             # NER-F1 metrics
-            for metric in self.metrics["span_based_f1"]:
+            for metric in self.metrics:
                 metric(class_probabilities_labels, tags, mask)
 
-            # Combining medical codes into a string
+            # NORM-F1 metrics
 
-            # TODO: include metrics for NORM parts
-            # TODO: colapsar los tres codigos en uno, y aplicar F1 de clasificacion
+            # Getting the indexes of the winner predictions
+            (
+                index_predicted_threeDs,
+                index_predicted_fourD,
+                index_predicted_bgh,
+            ) = self._return_argmax(
+                class_probabilities_threeDs,
+                class_probabilities_fourD,
+                class_probabilities_bgh,
+            )
+
+            # Obtaining the medical codes of the winner predictions
+            code_threeDs = threeDs[index_predicted_threeDs]
+            code_fourD = fourD[index_predicted_fourD]
+            code_bgh = bgh[index_predicted_bgh]
+
+            # Combining predicted medical codes into a string
+            candidate_medical_code = (
+                code_threeDs + "&" + code_fourD + "&" + code_bgh
+            )  # combining medical codes into a string
+
+            # Search for the index of the predicted code in the dinamically generated list of medical codes (permutation)
+            index_candidate_code = self._search_code_index(
+                self.medical_codes, candidate_medical_code
+            )
+
+            # One-hot encoded predicted medical code
+            predicted_code = torch.zeros(len(self.medical_codes))
+            predicted_code[index_candidate_code] = 1.0
+
+            # Getting the indexes of the gold labels
+            index_gold_threeDs, index_gold_fourD, index_gold_bgh = self._return_argmax(
+                threeDs, fourD, bgh
+            )
+
+            gold_threeDs = threeDs[index_gold_threeDs]
+            gold_fourD = fourD[index_gold_fourD]
+            gold_bgh = bgh[index_gold_bgh]
+
+            candidate_gold_code = gold_threeDs + "&" + gold_fourD + "&" + gold_bgh
+
+            index_candidate_code = self._search_code_index(
+                self.medical_codes, candidate_gold_code
+            )
+
+            gold_code = torch.zeros(len(self.medical_codes))
+            gold_code[index_candidate_code] = 1.0
+
+            self.f1_code(predicted_code, gold_code)
 
         return output
+
+    def _return_argmax(self, *args) -> List:
+        """Auxiliar function to return a list of all argmax of vectors/tensor inputs"""
+        return [torch.argmax(arg) for arg in args]
+
+    def _search_code_index(self, matrix, code):
+        """Given a matrix and an element of the matrix, return its index. Returns -1 in case of error"""
+        try:
+            return matrix.index(code)
+        except ValueError:
+            return -1
 
     # def _decode_tags(self, viterbi_paths: Dict) -> Dict[List[str]]:
     #     """

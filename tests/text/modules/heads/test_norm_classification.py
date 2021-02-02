@@ -8,7 +8,6 @@ from biome.text import Pipeline
 from biome.text import TrainerConfiguration
 from biome.text import VocabularyConfiguration
 from biome.text import vocabulary
-from biome.text.modules.heads import TaskOutput
 
 
 @pytest.fixture
@@ -143,14 +142,14 @@ def test_batch(pipeline_dict, training_dataset):
     batch = Batch([instance])
     batch.index_instances(pl.vocab)
 
-    tensor_dict = batch.as_tensor_dict()
+    batch.as_tensor_dict()
     batch._check_types()
 
     # pl.head.forward(**tensor_dict)
     # assert False
 
 
-def test_forward(pipeline_dict, training_dataset):
+def test_forward_metrics(pipeline_dict, training_dataset):
     from allennlp.data import Batch
 
     pl = Pipeline.from_config(pipeline_dict)
@@ -167,5 +166,15 @@ def test_forward(pipeline_dict, training_dataset):
 
     tensor_dict = batch.as_tensor_dict()
 
+    # Calling the forward method twice
     pl.head.forward(**tensor_dict)
+    pl.head.forward(**tensor_dict)
+
+    print(pl.head.get_metrics())
+
     assert False
+
+
+# llamar dos veces el forward y se hace request a las metrics, me aseguro que los numeros esten entre 0 y 1 y con buen formato
+
+# un test para las metricas y un test para el forward output
