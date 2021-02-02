@@ -17,10 +17,8 @@ from biome.text import helpers
 from biome.text import vocabulary
 from biome.text.backbone import ModelBackbone
 from biome.text.metrics import MultiLabelF1Measure
-
-from ..task_head import TaskHead
-from ..task_head import TaskName
-from ..task_head import TaskOutput
+from biome.text.modules.heads.task_head import TaskHead
+from biome.text.modules.heads.task_head import TaskName
 
 
 class ClassificationHead(TaskHead):
@@ -36,9 +34,6 @@ class ClassificationHead(TaskHead):
 
         # label related configurations
         self._multilabel = multilabel
-        self.calculate_output = (
-            self.multi_label_output if self._multilabel else self.single_label_output
-        )
 
         # metrics and loss
         if self._multilabel:
@@ -57,19 +52,16 @@ class ClassificationHead(TaskHead):
             )
             self._loss = torch.nn.CrossEntropyLoss()
 
-    def forward(self, *args: Any, **kwargs: Any) -> TaskOutput:
-        raise NotImplementedError
-
-    def featurize(self, *args, **kwargs) -> Optional[Instance]:
-        raise NotImplementedError
-
-    def add_label(
+    def _add_label(
         self,
         instance: Instance,
         label: Union[List[str], List[int], str, int],
         to_field: str = "label",
     ) -> Optional[Instance]:
-        """Includes the label field for classification into the instance data"""
+        """Includes the label field for classification into the instance data
+
+        Helper function for the child's `self.featurize` method.
+        """
         # "if not label:" fails for ndarrays this is why we explicitly check None
         if label is None:
             return instance
@@ -89,45 +81,77 @@ class ClassificationHead(TaskHead):
         instance.add_field(to_field, field)
         return instance
 
-    def decode(self, output: TaskOutput) -> TaskOutput:
-        """Completes the output for the prediction
+    def _make_forward_output(
+        self, logits: torch.Tensor, label: Optional[torch.IntTensor]
+    ) -> Dict[str, Any]:
+        """Returns a dict with the logits and optionally the loss
 
-        Mainly adds probabilities and keys for the UI.
+        Helper function for the child's `self.forward` method.
+        """
+        if label is not None:
+            return {
+                "loss": self._compute_metrics_and_return_loss(logits, label),
+                "logits": logits,
+            }
+
+        return {"logits": logits}
+
+    def _compute_metrics_and_return_loss(
+        self, logits: torch.Tensor, label: torch.IntTensor
+    ) -> float:
+        """Helper function for the `self._make_forward_output` method."""
+        for metric in self.metrics.values():
+            metric(logits, label)
+
+        if self._multilabel:
+            # casting long to float for BCELoss
+            # see https://discuss.pytorch.org/t/nn-bcewithlogitsloss-cant-accept-one-hot-target/59980
+            return self._loss(
+                logits.view(-1, self.num_labels),
+                label.view(-1, self.num_labels).type_as(logits),
+            )
+
+        return self._loss(logits, label.long())
+
+    def _compute_labels_and_probabilities(
+        self,
+        single_forward_output: Dict[str, numpy.ndarray],
+    ) -> Tuple[List[str], List[float]]:
+        """Computes the probabilities based on the logits and looks up the labels
+
+        This is a helper function for the `self._make_task_prediction` of the children.
 
         Parameters
         ----------
-        output
-            The output from the head's forward method
+        single_forward_output
+            A single (not batched) output from the head's forward method
 
         Returns
         -------
-        completed_output
+        (labels, probabilities)
         """
+        logits = torch.from_numpy(single_forward_output["logits"])
+
         if self._multilabel:
-            probabilities_batch = output.logits.sigmoid()
+            probabilities = logits.sigmoid()
         else:
-            probabilities_batch = torch.nn.functional.softmax(output.logits, dim=-1)
+            probabilities = torch.nn.functional.softmax(logits, dim=0)
 
-        output.labels, output.probabilities = [], []
-        if self.num_labels > 0:
-            output.labels, output.probabilities = zip(
-                *[
-                    self._get_labels_and_probabilities(probs)
-                    for probs in probabilities_batch
-                ]
-            )
+        labels, all_probabilities = (
+            self._add_and_sort_labels_and_probabilities(probabilities)
+            if self.num_labels > 0
+            else ([], [])
+        )
 
-        del output.logits
+        return labels, all_probabilities
 
-        return output
-
-    def _get_labels_and_probabilities(
+    def _add_and_sort_labels_and_probabilities(
         self, probabilities: torch.Tensor
     ) -> Tuple[List[str], List[float]]:
         """Returns the labels and probabilities sorted by the probability (descending)
 
-        The list of the returned probabilities can be larger than the input probabilities,
-        since we add all defined labels in the head.
+        Helper function for the `self._compute_labels_and_probabilities` method. The list of the returned
+        probabilities can be larger than the input probabilities, since we add all defined labels in the head.
 
         Parameters
         ----------
@@ -149,15 +173,13 @@ class ClassificationHead(TaskHead):
             all_classes_probs, descending=True
         ).tolist()
 
-        labels, probabilities = zip(
-            *[
-                (
-                    vocabulary.label_for_index(self.backbone.vocab, idx),
-                    float(all_classes_probs[idx]),
-                )
-                for idx in sorted_indexes_by_prob
-            ]
-        )
+        labels = [
+            vocabulary.label_for_index(self.backbone.vocab, idx)
+            for idx in sorted_indexes_by_prob
+        ]
+        probabilities = [
+            float(all_classes_probs[idx]) for idx in sorted_indexes_by_prob
+        ]
 
         return labels, probabilities
 
@@ -193,32 +215,3 @@ class ClassificationHead(TaskHead):
                     final_metrics.update({"_{}/{}".format(k, label): v})
 
         return final_metrics
-
-    def single_label_output(
-        self, logits: torch.Tensor, label: Optional[torch.IntTensor] = None
-    ) -> TaskOutput:
-        output = TaskOutput(logits=logits)
-
-        if label is not None:
-            output.loss = self._loss(logits, label.long())
-            for metric in self.metrics.values():
-                metric(logits, label)
-
-        return output
-
-    def multi_label_output(
-        self, logits: torch.Tensor, label: Optional[torch.IntTensor] = None
-    ) -> TaskOutput:
-        output = TaskOutput(logits=logits)
-
-        if label is not None:
-            # casting long to float for BCELoss
-            # see https://discuss.pytorch.org/t/nn-bcewithlogitsloss-cant-accept-one-hot-target/59980
-            output.loss = self._loss(
-                logits.view(-1, self.num_labels),
-                label.view(-1, self.num_labels).type_as(logits),
-            )
-            for metric in self.metrics.values():
-                metric(logits, label)
-
-        return output

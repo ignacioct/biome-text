@@ -18,11 +18,13 @@ import spacy
 import spacy.gold
 import yaml
 from allennlp.common import util
+from allennlp.data import Token as AllenNLPToken
 from allennlp.data.dataset_readers.dataset_utils import to_bioul
 from elasticsearch import Elasticsearch
+from spacy.tokens import Token as SpacyToken
 from spacy.tokens.doc import Doc
 
-from . import environment
+from biome.text import environment
 
 _INVALID_TAG_CHARACTERS = re.compile(r"[^-/\w\.]")
 
@@ -97,6 +99,8 @@ def update_method_signature(
         return to_method(*args, **kwargs)
 
     wrapper.__signature__ = signature
+    wrapper.__doc__ = to_method.__doc__
+
     return wrapper
 
 
@@ -383,9 +387,12 @@ def merge_dicts(source: Dict[str, Any], destination: Dict[str, Any]) -> Dict[str
     """
     Merge two dictionaries recursivelly
 
+    Examples
+    --------
     >>> a = { 'first' : { 'all_rows' : { 'pass' : 'dog', 'number' : '1' } } }
     >>> b = { 'first' : { 'all_rows' : { 'fail' : 'cat', 'number' : '5' } } }
-    >>> merge_dicts(b, a) == { 'first' : { 'all_rows' : { 'pass' : 'dog', 'fail' : 'cat', 'number' : '5' } } }
+    >>> merge_dicts(b, a)
+    {'first': {'all_rows': {'pass': 'dog', 'number': '5', 'fail': 'cat'}}}
 
     """
     if not isinstance(destination, dict):
@@ -404,7 +411,7 @@ def merge_dicts(source: Dict[str, Any], destination: Dict[str, Any]) -> Dict[str
 
 
 def copy_sign_and_docs(org_func):
-    """Copy the signature and the docstring from the org_func"""
+    """Decorator to copy the signature and the docstring from the org_func"""
 
     def decorator(func):
         @functools.wraps(func)
@@ -417,3 +424,16 @@ def copy_sign_and_docs(org_func):
         return wrapper
 
     return decorator
+
+
+def spacy_to_allennlp_token(token: SpacyToken) -> AllenNLPToken:
+    return AllenNLPToken(
+        text=token.text,
+        idx=token.idx,
+        idx_end=token.idx + len(token),
+        lemma_=token.lemma_,
+        pos_=token.pos_,
+        tag_=token.tag_,
+        dep_=token.dep_,
+        ent_type_=token.ent_type_,
+    )
