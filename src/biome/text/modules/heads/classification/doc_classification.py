@@ -88,8 +88,8 @@ class DocumentClassification(ClassificationHead):
 
     def featurize(
         self,
-        text: Any,
-        label: Optional[Union[int, str, List[Union[int, str]]]] = None,
+        text: Union[List[str], Dict[str, str]],
+        label: Optional[Union[str, List[str]]] = None,
     ) -> Optional[Instance]:
         instance = self.backbone.featurizer(
             text, to_field=self.forward_arg_name, exclude_record_keys=True
@@ -184,9 +184,7 @@ class DocumentClassification(ClassificationHead):
                 Attribution(
                     text=token.text,
                     start=token.idx,
-                    end=token.idx + len(token.text)
-                    if isinstance(token.idx, int)
-                    else None,
+                    end=self._get_token_end(token),
                     field=self.forward_arg_name,
                     attribution=attribution,
                 )
