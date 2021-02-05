@@ -36,13 +36,11 @@ if __name__ == "__main__":
         packages=find_namespace_packages("src"),
         package_dir={"": "src"},
         install_requires=[
-            "allennlp~=1.3.0",
+            "allennlp~=1.4.0",
             "beautifulsoup4~=4.9.0",
-            "cachey~=0.2.0",
             "captum~=0.2.0",
             "click~=7.1.0",
-            "datasets~=1.1.2",
-            "distributed~=2.17.0",
+            "datasets~=1.2.1",
             "elasticsearch>=6.8.0,<7.5.0",
             "fastapi~=0.55.0",
             "flask~=1.1.2",
@@ -51,14 +49,12 @@ if __name__ == "__main__":
             "gevent~=20.9.0",
             "ipywidgets~=7.5.1",
             "lxml~=4.6.2",
-            "mlflow~=1.9.0",
+            "mlflow~=1.13.1",
             "pandas~=1.1.0",
             "ray[tune]~=1.0.0",
-            "s3fs~=0.4.0",
             "spacy~=2.3.0",
             "tqdm>=4.49.0",
             "uvicorn~=0.11.0",
-            "xlrd~=1.2.0",
         ],
         extras_require={
             "dev": [
@@ -68,6 +64,7 @@ if __name__ == "__main__":
                 "pytest-pylint>=0.14.0",
                 "pytest-notebook~=0.6.0",
                 "wandb>=0.10.12",
+                "xlrd~=1.2.0",
                 # documentation
                 "pdoc3~=0.8.1",
                 # development
