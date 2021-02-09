@@ -14,7 +14,6 @@ from biome.text import vocabulary
 def training_dataset() -> Dataset:
     """Dummy dataset, similar to CANTEMIST-NORM task"""
 
-    # TODO: quitar raw
     df = pd.DataFrame(
         {
             "text_org": [
@@ -34,7 +33,7 @@ def training_dataset() -> Dataset:
             ],
             "file": ["cc_onco1.txt", "cc_onco1.txt"],
             "sentence_offset": [0, 2],
-            "code": [["8041/3\n", "8041/3\n"], ["O", "O"]],
+            "code": [["B-8041/3\n", "L-8041/3\n"], ["O", "O"]],
         }
     )
 
@@ -53,9 +52,9 @@ def pipeline_dict() -> Dict:
                 "MORFOLOGIA_NEOPLASIA",
             ],
             "label_encoding": "BIOUL",
-            "threeDs": ["O", "804"],
-            "fourD": ["O", "1"],
-            "bgh": ["O", "3"],
+            "threeDs": ["804"],
+            "fourD": ["1"],
+            "bgh": ["3"],
         },
     }
 
@@ -115,15 +114,15 @@ def test_featurize(pipeline_dict, training_dataset, example_medical_codes):
     # As we have two words, the code is duplicated, so we compare with the first element of the list
     assert (
         convert_list_to_string([label for label in instance["threeDs"].labels[0]])
-        == example_medical_codes["threeDs"]
+        == "B-" + example_medical_codes["threeDs"]
     )  # as we have two words, the code is duplicated, so we compare with the first element of the list
     assert (
         convert_list_to_string([label for label in instance["fourD"].labels[0]])
-        == example_medical_codes["fourD"]
+        == "B-" + example_medical_codes["fourD"]
     )
     assert (
         convert_list_to_string([label for label in instance["bgh"].labels[0]])
-        == example_medical_codes["bgh"]
+        == "B-" + example_medical_codes["bgh"]
     )
 
 

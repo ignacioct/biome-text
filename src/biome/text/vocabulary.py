@@ -133,6 +133,27 @@ def set_labels(vocab: Vocabulary, new_labels: List[str]):
     extend_labels(vocab, new_labels)
 
 
+def set_labels_with_namespace(vocab: Vocabulary, new_labels: List[str], namespace: str):
+    """Resets the labels in the vocabulary with a given labels string list
+
+    Parameters
+    ----------
+    vocab: `allennlp.data.Vocabulary`
+    new_labels: `List[str]`
+        The label strings to add to the vocabulary
+    namespace: `str`
+    """
+    for vocab_dict in [
+        vocab.get_token_to_index_vocabulary(namespace),
+        vocab.get_index_to_token_vocabulary(namespace),
+    ]:
+        tokens = list(vocab_dict.keys())
+        for token in tokens:
+            del vocab_dict[token]
+
+    vocab.add_tokens_to_namespace(new_labels, namespace=namespace)
+
+
 def create_empty_vocabulary() -> Vocabulary:
     """Creates an empty Vocabulary with configured namespaces
 

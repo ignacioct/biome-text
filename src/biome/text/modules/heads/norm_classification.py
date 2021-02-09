@@ -113,11 +113,32 @@ class NORMClassification(TaskHead):
 
         # Extending vocabulary for the medical codes
 
-        self.backbone.vocab.add_tokens_to_namespace(threeDs, namespace="3D_tags")
+        vocabulary.set_labels_with_namespace(
+            self.backbone.vocab,
+            # Convert span labels to tag labels if necessary
+            # We just check if "O" is in the label list, a necessary tag for IOB/BIOUL schemes,
+            # an unlikely label for spans
+            span_labels_to_tag_labels(threeDs, self._label_encoding),
+            namespace="3D_tags",
+        )
 
-        self.backbone.vocab.add_tokens_to_namespace(fourD, namespace="4D_tags")
+        vocabulary.set_labels_with_namespace(
+            self.backbone.vocab,
+            # Convert span labels to tag labels if necessary
+            # We just check if "O" is in the label list, a necessary tag for IOB/BIOUL schemes,
+            # an unlikely label for spans
+            span_labels_to_tag_labels(fourD, self._label_encoding),
+            namespace="4D_tags",
+        )
 
-        self.backbone.vocab.add_tokens_to_namespace(bgh, namespace="bgh_tags")
+        vocabulary.set_labels_with_namespace(
+            self.backbone.vocab,
+            # Convert span labels to tag labels if necessary
+            # We just check if "O" is in the label list, a necessary tag for IOB/BIOUL schemes,
+            # an unlikely label for spans
+            span_labels_to_tag_labels(bgh, self._label_encoding),
+            namespace="bgh_tags",
+        )
 
         self.dropout = torch.nn.Dropout(dropout)
 
@@ -198,6 +219,7 @@ class NORMClassification(TaskHead):
         self, logits: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor
     ):
         """loss is calculated as -log_likelihood from crf"""
+        # hacer un bucle for seria muy ineficiente
         return -1 * self._crf(logits, labels, mask)
 
     def _fourD_loss(
@@ -257,19 +279,24 @@ class NORMClassification(TaskHead):
                 fourD.append("O")
                 bgh.append("O")
             else:
+
+                bioul_tag = medical_code.split("-")[0]
+                bioul_tag = bioul_tag + "-"
+                medical_code = medical_code.split("-")[1]
+
                 threeDs_code = medical_code.split(" ")[0]
                 threeDs_code = threeDs_code.replace("\n", "").split("/")[0]
-                threeDs.append(threeDs_code[0:3])
-                fourD.append(threeDs_code[3])
+                threeDs.append(bioul_tag + threeDs_code[0:3])
+                fourD.append(bioul_tag + threeDs_code[3])
 
                 bgh_code = medical_code.split(" ")[0]
                 bgh_code = bgh_code.replace("\n", "").split("\t")[0].split("/")
 
                 if len(bgh_code) == 2:
-                    bgh.append(bgh_code[1])
+                    bgh.append(bioul_tag + bgh_code[1])
                 elif len(bgh_code) == 3:
                     separator = ""
-                    bgh.append(separator.join(bgh_code[-2:]))
+                    bgh.append(separator.join(bioul_tag + bgh_code[-2:]))
                 else:
                     raise Exception(
                         "Unexpected bgh code in the medical code ", medical_code
