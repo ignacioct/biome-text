@@ -166,13 +166,40 @@ class NORMClassification(TaskHead):
             )  # 10 possible digits + 'O'
         )
 
-        constraints = allowed_transitions(
+        _constraints_labels = allowed_transitions(
             self._label_encoding,
             vocabulary.get_index_to_labels_dictionary(self.backbone.vocab),
         )
 
-        self._crf = ConditionalRandomField(
-            self.num_labels, constraints, include_start_end_transitions=True
+        _constraints_threeDs = allowed_transitions(
+            self._label_encoding,
+            self.backbone.vocab.get_index_to_token_vocabulary("3D_tags"),
+        )
+
+        _constraints_fourD = allowed_transitions(
+            self._label_encoding,
+            self.backbone.vocab.get_index_to_token_vocabulary("4D_tags"),
+        )
+
+        _constraints_bgh = allowed_transitions(
+            self._label_encoding,
+            self.backbone.vocab.get_index_to_token_vocabulary("bgh_tags"),
+        )
+
+        self._crf_labels = ConditionalRandomField(
+            self.num_labels, _constraints_labels, include_start_end_transitions=True
+        )
+
+        self._crf_threeDs = ConditionalRandomField(
+            self.num_labels, _constraints_threeDs, include_start_end_transitions=True
+        )
+
+        self._crf_fourD = ConditionalRandomField(
+            self.num_labels, _constraints_fourD, include_start_end_transitions=True
+        )
+
+        self._crf_bgh = ConditionalRandomField(
+            self.num_labels, _constraints_bgh, include_start_end_transitions=True
         )
 
         self.metrics = {"accuracy": CategoricalAccuracy()}
@@ -213,24 +240,23 @@ class NORMClassification(TaskHead):
 
     def _loss(self, logits: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor):
         """loss is calculated as -log_likelihood from crf"""
-        return -1 * self._crf(logits, labels, mask)
+        return -1 * self._crf_labels(logits, labels, mask)
 
     def _threeDs_loss(
         self, logits: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor
     ):
         """loss is calculated as -log_likelihood from crf"""
-        # hacer un bucle for seria muy ineficiente
-        return -1 * self._crf(logits, labels, mask)
+        return -1 * self._crf_threeDs(logits, labels, mask)
 
     def _fourD_loss(
         self, logits: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor
     ):
         """loss is calculated as -log_likelihood from crf"""
-        return -1 * self._crf(logits, labels, mask)
+        return -1 * self._crf_fourD(logits, labels, mask)
 
     def _bgh_loss(self, logits: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor):
         """loss is calculated as -log_likelihood from crf"""
-        return -1 * self._crf(logits, labels, mask)
+        return -1 * self._crf_bgh(logits, labels, mask)
 
     def featurize(
         self,
@@ -388,7 +414,7 @@ class NORMClassification(TaskHead):
 
         viterbi_paths_labels: List[
             List[Tuple[List[int], float]]
-        ] = self._crf.viterbi_tags(label_logits, mask, top_k=self.top_k)
+        ] = self._crf_labels.viterbi_tags(label_logits, mask, top_k=self.top_k)
         # we just keep the best path for every instance
         predicted_tags_labels: List[List[int]] = [
             paths[0][0] for paths in viterbi_paths_labels
