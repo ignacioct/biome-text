@@ -92,9 +92,18 @@ class NORMClassification(TaskHead):
         # Parammeter-Variable assignment
         self._span_labels = labels
         self._label_encoding = label_encoding
-        self._threeDs: threeDs
-        self._fourD: fourD
-        self._bgh: bgh
+
+        # List with all possible medical codes, divided in categories
+        self._threeDs = threeDs
+        self._fourD = fourD
+        self._bgh = bgh
+
+        # Adding BIOUL tags to medical codes
+        self._threeDs_tags = span_labels_to_tag_labels(
+            self._threeDs, self._label_encoding
+        )
+        self._fourD_tags = span_labels_to_tag_labels(self._fourD, self._label_encoding)
+        self._bgh_tags = span_labels_to_tag_labels(self._bgh, self._label_encoding)
 
         # Top-k
         if top_k is None:
@@ -118,7 +127,7 @@ class NORMClassification(TaskHead):
             # Convert span labels to tag labels if necessary
             # We just check if "O" is in the label list, a necessary tag for IOB/BIOUL schemes,
             # an unlikely label for spans
-            span_labels_to_tag_labels(threeDs, self._label_encoding),
+            self._threeDs_tags,
             namespace="3D_tags",
         )
 
@@ -127,7 +136,7 @@ class NORMClassification(TaskHead):
             # Convert span labels to tag labels if necessary
             # We just check if "O" is in the label list, a necessary tag for IOB/BIOUL schemes,
             # an unlikely label for spans
-            span_labels_to_tag_labels(fourD, self._label_encoding),
+            self._fourD_tags,
             namespace="4D_tags",
         )
 
@@ -136,7 +145,7 @@ class NORMClassification(TaskHead):
             # Convert span labels to tag labels if necessary
             # We just check if "O" is in the label list, a necessary tag for IOB/BIOUL schemes,
             # an unlikely label for spans
-            span_labels_to_tag_labels(bgh, self._label_encoding),
+            self._bgh_tags,
             namespace="bgh_tags",
         )
 
@@ -151,18 +160,18 @@ class NORMClassification(TaskHead):
         )
 
         self._threeDs_projection_layer = TimeDistributed(
-            torch.nn.Linear(self._classifier_input_dim, len(threeDs))
+            torch.nn.Linear(self._classifier_input_dim, len(self._threeDs_tags))
         )
 
         self._fourD_projection_layer = TimeDistributed(
             torch.nn.Linear(
-                self._classifier_input_dim, len(fourD)
+                self._classifier_input_dim, len(self._fourD_tags)
             )  # 10 possible digits + 'O'
         )
 
         self._bgh_projection_layer = TimeDistributed(
             torch.nn.Linear(
-                self._classifier_input_dim, len(bgh)
+                self._classifier_input_dim, len(self._bgh_tags)
             )  # 10 possible digits + 'O'
         )
 
@@ -294,16 +303,17 @@ class NORMClassification(TaskHead):
         )
 
         # Declaring lists of 3Ds, 4Ds and BGHs
-        threeDs = []
-        fourD = []
-        bgh = []
+
+        self._threeDs_input = []
+        self._fourD_input = []
+        self._bgh_input = []
 
         # Dividing the medical code into 3Ds, 4D and BGH
         for medical_code in medical_codes:
             if medical_code == "O":
-                threeDs.append("O")
-                fourD.append("O")
-                bgh.append("O")
+                self._threeDs_input.append("O")
+                self._fourD_input.append("O")
+                self._bgh_input.append("O")
             else:
 
                 bioul_tag = medical_code.split("-")[0]
@@ -312,17 +322,17 @@ class NORMClassification(TaskHead):
 
                 threeDs_code = medical_code.split(" ")[0]
                 threeDs_code = threeDs_code.replace("\n", "").split("/")[0]
-                threeDs.append(bioul_tag + threeDs_code[0:3])
-                fourD.append(bioul_tag + threeDs_code[3])
+                self._threeDs_input.append(bioul_tag + threeDs_code[0:3])
+                self._fourD_input.append(bioul_tag + threeDs_code[3])
 
                 bgh_code = medical_code.split(" ")[0]
                 bgh_code = bgh_code.replace("\n", "").split("\t")[0].split("/")
 
                 if len(bgh_code) == 2:
-                    bgh.append(bioul_tag + bgh_code[1])
+                    self._bgh_input.append(bioul_tag + bgh_code[1])
                 elif len(bgh_code) == 3:
                     separator = ""
-                    bgh.append(separator.join(bioul_tag + bgh_code[-2:]))
+                    self._bgh_input.append(separator.join(bioul_tag + bgh_code[-2:]))
                 else:
                     raise Exception(
                         "Unexpected bgh code in the medical code ", medical_code
@@ -343,38 +353,45 @@ class NORMClassification(TaskHead):
             )
 
             # 3Ds
-            assert tags, f"No 3Ds codes found when training. Data [{tokens, threeDs}]"
+            assert (
+                self._threeDs_input
+            ), f"No 3Ds codes found when training. Data [{tokens, self._threeDs_input}]"
             instance.add_field(
                 "threeDs",
                 SequenceLabelField(
-                    threeDs,
+                    self._threeDs_input,
                     sequence_field=cast(TextField, instance["text"]),
                     label_namespace="3D_tags",
                 ),
             )
 
             # 4D
-            assert tags, f"No 4D codes found when training. Data [{tokens, fourD}]"
+            assert (
+                self._fourD_input
+            ), f"No 4D codes found when training. Data [{tokens, self._fourD_input}]"
             instance.add_field(
                 "fourD",
                 SequenceLabelField(
-                    fourD,
+                    self._fourD_input,
                     sequence_field=cast(TextField, instance["text"]),
                     label_namespace="4D_tags",
                 ),
             )
 
             # BGH
-            assert tags, f"No BGH codes found when training. Data [{tokens, bgh}]"
+            assert (
+                self._bgh_input
+            ), f"No BGH codes found when training. Data [{tokens, self._bgh_input}]"
             instance.add_field(
                 "bgh",
                 SequenceLabelField(
-                    bgh,
+                    self._bgh_input,
                     sequence_field=cast(TextField, instance["text"]),
                     label_namespace="bgh_tags",
                 ),
             )
 
+            # Raw text field to keep the input as data
             instance.add_field("raw_text", MetadataField(raw_text))
 
         return instance
@@ -473,20 +490,20 @@ class NORMClassification(TaskHead):
             fourD_loss = self._fourD_loss(threeDs_logits, fourD, mask)
             bgh_loss = self._bgh_loss(threeDs_logits, bgh, mask)
 
-            output.labels_loss = self._loss(label_logits, tags, mask)
-            output.threeDs_loss = threeDs_loss
-            output.fourD_loss = fourD_loss
-            output.bgh_loss = bgh_loss
+            output["labels_loss"] = self._loss(label_logits, tags, mask)
+            output["threeDs_loss"] = threeDs_loss
+            output["fourD_loss"] = fourD_loss
+            output["bgh_loss"] = bgh_loss
 
-            output.loss = (
-                output.labels_loss
-                + output.threeDs_loss
-                + output.fourD_loss
-                + output.bgh_loss
+            output["loss"] = (
+                output["labels_loss"]
+                + output["threeDs_loss"]
+                + output["fourD_loss"]
+                + output["bgh_loss"]
             )
 
             # NER-F1 metrics
-            for metric in self.metrics:
+            for metric in self.__all_metrics:
                 metric(class_probabilities_labels, tags, mask)
 
             # NORM-F1 metrics
@@ -502,14 +519,19 @@ class NORMClassification(TaskHead):
                 class_probabilities_bgh,
             )
 
+            # Turning tensors into ints
+            index_predicted_threeDs = index_predicted_threeDs.item()
+            index_predicted_fourD = index_predicted_fourD.item()
+            index_predicted_bgh = index_predicted_bgh.item()
+
             # Obtaining the medical codes of the winner predictions
-            code_threeDs = threeDs[index_predicted_threeDs]
-            code_fourD = fourD[index_predicted_fourD]
-            code_bgh = bgh[index_predicted_bgh]
+            code_threeDs = self._threeDs[index_predicted_threeDs]
+            code_fourD = self._fourD[index_predicted_fourD]
+            code_bgh = self._bgh[index_predicted_bgh]
 
             # Combining predicted medical codes into a string
             candidate_medical_code = (
-                code_threeDs + "&" + code_fourD + "&" + code_bgh
+                str(code_threeDs) + "&" + str(code_fourD) + "&" + str(code_bgh)
             )  # combining medical codes into a string
 
             # Search for the index of the predicted code in the dinamically generated list of medical codes (permutation)
@@ -526,11 +548,19 @@ class NORMClassification(TaskHead):
                 threeDs, fourD, bgh
             )
 
-            gold_threeDs = threeDs[index_gold_threeDs]
-            gold_fourD = fourD[index_gold_fourD]
-            gold_bgh = bgh[index_gold_bgh]
+            # Turning tensors into ints
+            index_gold_threeDs = index_gold_threeDs.item()
+            index_gold_fourD = index_gold_fourD.item()
+            index_gold_bgh = index_gold_bgh.item()
 
-            candidate_gold_code = gold_threeDs + "&" + gold_fourD + "&" + gold_bgh
+            print(self._threeDs)
+            gold_threeDs = self._threeDs[index_gold_threeDs]
+            gold_fourD = self._fourD[index_gold_fourD]
+            gold_bgh = self._bgh[index_gold_bgh]
+
+            candidate_gold_code = (
+                str(gold_threeDs) + "&" + str(gold_fourD) + "&" + str(gold_bgh)
+            )
 
             index_candidate_code = self._search_code_index(
                 self.medical_codes, candidate_gold_code
