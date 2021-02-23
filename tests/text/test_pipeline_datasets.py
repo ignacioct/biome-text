@@ -8,8 +8,14 @@ from biome.text import Dataset
 from biome.text import Pipeline
 from biome.text import PipelineConfiguration
 from biome.text import TrainerConfiguration
+from biome.text.backbone import ModelBackbone
+from biome.text.modules.heads import TextClassification
 from biome.text.modules.heads import TextClassificationConfiguration
-from tests.text.test_pipeline_model import TestHead
+
+
+class TestHead(TextClassification):
+    def __init__(self, backbone: ModelBackbone):
+        super(TestHead, self).__init__(backbone, labels=["test", "notest"])
 
 
 @pytest.fixture
@@ -40,7 +46,7 @@ def test_training_with_data_bucketing(
     pipeline: Pipeline, dataset: Dataset, tmp_path: str
 ):
     configuration = TrainerConfiguration(
-        data_bucketing=True, batch_size=2, num_epochs=5
+        data_bucketing=True, batch_size=2, num_epochs=5, cuda_device=-1
     )
 
     pipeline.copy().train(
@@ -90,7 +96,7 @@ def test_training_from_pretrained_with_head_replace(
 
 def test_training_with_logging(pipeline: Pipeline, dataset: Dataset, tmp_path: str):
     configuration = TrainerConfiguration(
-        data_bucketing=True, batch_size=2, num_epochs=5
+        data_bucketing=True, batch_size=2, num_epochs=5, cuda_device=-1
     )
     output_dir = os.path.join(tmp_path, "output")
     pipeline.train(
@@ -99,7 +105,7 @@ def test_training_with_logging(pipeline: Pipeline, dataset: Dataset, tmp_path: s
 
     assert os.path.exists(os.path.join(output_dir, "train.log"))
     with open(os.path.join(output_dir, "train.log")) as train_log:
-        for line in train_log.readlines()[3:]:
+        for line in train_log.readlines()[4:]:
             assert "allennlp" in line
 
     assert logging.getLogger("allennlp").level == logging.ERROR

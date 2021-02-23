@@ -1,5 +1,6 @@
 import copy
 import inspect
+import json
 import logging
 import os
 import shutil
@@ -8,13 +9,15 @@ from inspect import Parameter
 from pathlib import Path
 from typing import Any
 from typing import Dict
-from typing import Iterable
+from typing import Iterator
 from typing import List
 from typing import Optional
+from typing import Tuple
 from typing import Type
 from typing import Union
 from typing import cast
 
+import mlflow
 import numpy
 import torch
 from allennlp.commands.find_learning_rate import search_learning_rate
@@ -24,11 +27,15 @@ from allennlp.data import AllennlpLazyDataset
 from allennlp.data import Vocabulary
 from allennlp.models import load_archive
 from allennlp.models.archival import Archive
+from allennlp.models.archival import archive_model
 from allennlp.training.util import evaluate
 
 from biome.text import vocabulary
+from biome.text._model import PipelineModel
+from biome.text.backbone import ModelBackbone
 from biome.text.configuration import FindLRConfiguration
 from biome.text.configuration import PipelineConfiguration
+from biome.text.configuration import PredictionConfiguration
 from biome.text.configuration import TrainerConfiguration
 from biome.text.configuration import VocabularyConfiguration
 from biome.text.dataset import Dataset
@@ -37,14 +44,11 @@ from biome.text.errors import EmptyVocabError
 from biome.text.features import TransformersFeatures
 from biome.text.features import WordFeatures
 from biome.text.helpers import update_method_signature
-
-from ._model import PipelineModel
-from .backbone import ModelBackbone
-from .loggers import BaseTrainLogger
-from .loggers import add_default_wandb_logger_if_needed
-from .modules.heads import TaskHead
-from .modules.heads import TaskHeadConfiguration
-from .training_results import TrainingResults
+from biome.text.loggers import BaseTrainLogger
+from biome.text.loggers import add_default_wandb_logger_if_needed
+from biome.text.modules.heads import TaskHead
+from biome.text.modules.heads import TaskHeadConfiguration
+from biome.text.training_results import TrainingResults
 
 logging.getLogger("allennlp").setLevel(logging.ERROR)
 logging.getLogger("elasticsearch").setLevel(logging.ERROR)
@@ -66,20 +70,37 @@ class Pipeline:
 
         self._update_prediction_signatures()
 
+    def _update_prediction_signatures(self):
+        """Updates the `self.predict` signature to match the model inputs for interactive work-flows"""
+        updated_parameters = [
+            par
+            for name, par in inspect.signature(self.head.featurize).parameters.items()
+            if par.default == Parameter.empty
+        ] + [
+            par
+            for name, par in inspect.signature(self.predict).parameters.items()
+            if name not in ["args", "kwargs"]
+        ]
+        new_signature = inspect.Signature(updated_parameters)
+
+        self.__setattr__(
+            self.predict.__name__, update_method_signature(new_signature, self.predict)
+        )
+
     @classmethod
     def from_yaml(cls, path: str, vocab_path: Optional[str] = None) -> "Pipeline":
         """Creates a pipeline from a config yaml file
 
         Parameters
         ----------
-        path : `str`
+        path
             The path to a YAML configuration file
-        vocab_path : `Optional[str]`
+        vocab_path
             If provided, the pipeline vocab will be loaded from this path
 
         Returns
         -------
-        pipeline: `Pipeline`
+        pipeline
             A configured pipeline
         """
         pipeline_configuration = PipelineConfiguration.from_yaml(path)
@@ -96,14 +117,14 @@ class Pipeline:
 
         Parameters
         ----------
-        config: `Union[PipelineConfiguration, dict]`
+        config
             A `PipelineConfiguration` object or a configuration dict
-        vocab_path: `Optional[str]`
+        vocab_path
             If provided, the pipeline vocabulary will be loaded from this path
 
         Returns
         -------
-        pipeline: `Pipeline`
+        pipeline
             A configured pipeline
         """
         if isinstance(config, dict):
@@ -121,17 +142,17 @@ class Pipeline:
         return cls(model, config)
 
     @classmethod
-    def from_pretrained(cls, path: str) -> "Pipeline":
+    def from_pretrained(cls, path: Union[str, Path]) -> "Pipeline":
         """Loads a pretrained pipeline providing a *model.tar.gz* file path
 
         Parameters
         ----------
-        path: `str`
+        path
             The path to the *model.tar.gz* file of a pretrained `Pipeline`
 
         Returns
         -------
-        pipeline: `Pipeline`
+        pipeline
             A pretrained pipeline
         """
         archive = load_archive(
@@ -141,13 +162,86 @@ class Pipeline:
             overrides={"dataset_reader": {"type": "interleaving", "readers": {}}},
         )
         model = cls._model_from_archive(archive)
-        model.file_path = path
+        model.file_path = str(path)
         config = cls._config_from_archive(archive)
 
         if not isinstance(model, PipelineModel):
             raise TypeError(f"Cannot load model. Wrong format of {model}")
 
         return cls(model, config)
+
+    @property
+    def name(self) -> str:
+        """Gets the pipeline name"""
+        return self._model.name
+
+    @property
+    def inputs(self) -> List[str]:
+        """Gets the pipeline input field names"""
+        return self._model.inputs
+
+    @property
+    def output(self) -> List[str]:
+        """Gets the pipeline output field names"""
+        return self._model.output
+
+    @property
+    def backbone(self) -> ModelBackbone:
+        """Gets the model backbone of the pipeline"""
+        return self.head.backbone
+
+    @property
+    def head(self) -> TaskHead:
+        """Gets the pipeline task head"""
+        return self._model.head
+
+    @property
+    def vocab(self) -> Vocabulary:
+        """Gets the pipeline vocabulary"""
+        return self._model.vocab
+
+    @property
+    def config(self) -> PipelineConfiguration:
+        """Gets the pipeline configuration"""
+        return self._config
+
+    @property
+    def type_name(self) -> str:
+        """The pipeline name. Equivalent to task head name"""
+        return self.head.__class__.__name__
+
+    @property
+    def num_trainable_parameters(self) -> int:
+        """Number of trainable parameters present in the model.
+
+        At training time, this number can change when freezing/unfreezing certain parameter groups.
+        """
+        if vocabulary.is_empty(self.vocab, self.config.features.configured_namespaces):
+            self.__LOGGER.warning(
+                "At least one vocabulary of your features is still empty! "
+                "The number of trainable parameters usually depends on the size of your vocabulary."
+            )
+        return sum(p.numel() for p in self._model.parameters() if p.requires_grad)
+
+    @property
+    def num_parameters(self) -> int:
+        """Number of parameters present in the model."""
+        if vocabulary.is_empty(self.vocab, self.config.features.configured_namespaces):
+            self.__LOGGER.warning(
+                "At least one vocabulary of your features is still empty! "
+                "The number of trainable parameters usually depends on the size of your vocabulary."
+            )
+        return sum(p.numel() for p in self._model.parameters())
+
+    @property
+    def named_trainable_parameters(self) -> List[str]:
+        """Returns the names of the trainable parameters in the pipeline"""
+        return [name for name, p in self._model.named_parameters() if p.requires_grad]
+
+    @property
+    def model_path(self) -> str:
+        """Returns the file path to the serialized version of the last trained model"""
+        return self._model.file_path
 
     def init_prediction_logger(self, output_dir: str, max_logging_size: int = 100):
         """Initializes the prediction logging.
@@ -300,11 +394,14 @@ class Pipeline:
         training_results
             Training results including the generated model path and the related metrics
         """
-        trainer = trainer or TrainerConfiguration()
-        try:
-            if not restore and os.path.isdir(output):
-                shutil.rmtree(output)
+        from ._helpers import PipelineTrainer
 
+        trainer = trainer or TrainerConfiguration()
+
+        if not restore and os.path.isdir(output):
+            shutil.rmtree(output)
+
+        try:
             self.__configure_training_logging(output, quiet)
 
             self._prepare_vocab(
@@ -315,8 +412,6 @@ class Pipeline:
                 training_data=training,
                 lazy=lazy,
             )
-
-            from ._helpers import PipelineTrainer
 
             datasets = {"training": training, "validation": validation, "test": test}
             for name, dataset in datasets.items():
@@ -334,30 +429,10 @@ class Pipeline:
                 **datasets,
             )
 
-            for logger in loggers:
-                try:
-                    logger.init_train(
-                        pipeline=self,
-                        trainer_configuration=trainer,
-                        **datasets,
-                    )
-                except Exception as e:
-                    self.__LOGGER.warning(
-                        "Logger %s failed on init_train: %s", logger, e
-                    )
+            training_results = pipeline_trainer.train()
+            self._model.file_path = training_results.model_path
 
-            self._model.file_path, metrics = pipeline_trainer.train()
-            train_results = TrainingResults(self.model_path, metrics)
-
-            for logger in loggers:
-                try:
-                    logger.end_train(train_results)
-                except Exception as e:
-                    self.__LOGGER.warning(
-                        "Logger %s failed on end_traing: %s", logger, e
-                    )
-
-            return train_results
+            return training_results
 
         finally:
             self.__restore_training_logging()
@@ -423,18 +498,6 @@ class Pipeline:
                 "All your features need a non-empty vocabulary for a training!"
             )
 
-    def copy(self) -> "Pipeline":
-        """Returns a copy of the pipeline"""
-        model = PipelineModel.from_params(
-            Params({"config": self.config}), vocab=copy.deepcopy(self.vocab)
-        )
-        config = copy.deepcopy(self._config)
-
-        pipeline_copy = Pipeline(model, config)
-        pipeline_copy._model.load_state_dict(self._model.state_dict())
-
-        return pipeline_copy
-
     @staticmethod
     def __restore_training_logging():
         """Restore the training logging. This method should be called after a training process"""
@@ -487,82 +550,76 @@ class Pipeline:
             logger.addHandler(file_handler)
             logger.addHandler(console_handler)
 
-    def predict(self, *args, **kwargs) -> Dict[str, numpy.ndarray]:
+    def predict(
+        self,
+        *args,
+        batch: Optional[List[Dict[str, Any]]] = None,
+        add_tokens: bool = False,
+        add_attributions: bool = False,
+        attributions_kwargs: Optional[Dict] = None,
+        **kwargs,
+    ) -> Union[Dict[str, numpy.ndarray], List[Dict[str, numpy.ndarray]]]:
         """Returns a prediction given some input data based on the current state of the model
 
         The accepted input is dynamically calculated and can be checked via the `self.inputs` attribute
         (`print(Pipeline.inputs)`)
 
-        Returns
-        -------
-        predictions: `Dict[str, numpy.ndarray]`
-            A dictionary containing the predictions and additional information
-        """
-        return self._model.predict(*args, **kwargs)
-
-    def predict_batch(
-        self, input_dicts: Iterable[Dict[str, Any]]
-    ) -> List[Dict[str, numpy.ndarray]]:
-        """Returns predictions given some input data based on the current state of the model
-
-        The predictions will be computed batch-wise, which is faster
-        than calling `self.predict` for every single input data.
-
         Parameters
         ----------
-        input_dicts
-            The input data. The keys of the dicts must comply with the `self.inputs` attribute
-        """
-        return self._model.predict_batch(input_dicts)
-
-    def explain(self, *args, n_steps: int = 5, **kwargs) -> Dict[str, Any]:
-        """Returns a prediction given some input data including the attribution of each token to the prediction.
-
-        The attributions are calculated by means of the [Integrated Gradients](https://arxiv.org/abs/1703.01365) method.
-
-        The accepted input is dynamically calculated and can be checked via the `self.inputs` attribute
-        (`print(Pipeline.inputs)`)
-
-        Parameters
-        ----------
-        n_steps: int
-            The number of steps used when calculating the attribution of each token.
-            If the number of steps is less than 1, the attributions will not be calculated.
-
-        Returns
-        -------
-        predictions: `Dict[str, numpy.ndarray]`
-            A dictionary containing the predictions and attributions
-        """
-        return self._model.explain(*args, n_steps=n_steps, **kwargs)
-
-    def explain_batch(
-        self, input_dicts: Iterable[Dict[str, Any]], n_steps: int = 5
-    ) -> List[Dict[str, numpy.ndarray]]:
-        """Returns a prediction given some input data including the attribution of each token to the prediction.
-
-        The predictions will be computed batch-wise, which is faster
-        than calling `self.predict` for every single input data.
-
-        The attributions are calculated by means of the [Integrated Gradients](https://arxiv.org/abs/1703.01365) method.
-
-        The accepted input is dynamically calculated and can be checked via the `self.inputs` attribute
-        (`print(Pipeline.inputs)`)
-
-        Parameters
-        ----------
-        input_dicts
-            The input data. The keys of the dicts must comply with the `self.inputs` attribute
-        n_steps
-            The number of steps used when calculating the attribution of each token.
-            If the number of steps is less than 1, the attributions will not be calculated.
+        *args/**kwargs
+            These are dynamically updated and correspond to the pipeline's `self.inputs`.
+            You can provide either args/kwargs OR a batch.
+        batch
+            A list of dictionaries that represents a batch of inputs. The dictionary keys must comply with the
+            `self.inputs` attribute. You can provide either args/kwargs OR a batch. Predicting batches should
+            typically be faster than repeated calls with args/kwargs.
+        add_tokens
+            If true, adds a 'tokens' key in the prediction that contains the tokenized input.
+        add_attributions
+            If true, adds a 'attributions' key that contains attributions of the input to the prediction.
+        attributions_kwargs
+            This dict is directly passed on to the `TaskHead.compute_attributions()`.
 
         Returns
         -------
         predictions
-            A list of dictionaries containing the predictions and attributions
+            A dictionary or a list of dictionaries containing the predictions and additional information.
         """
-        return self._model.explain_batch(input_dicts, n_steps=n_steps)
+        # the signature of this method gets updated in the self.__init__
+        args_kwargs_names = [
+            f"`{name}`"
+            for name, par in inspect.signature(self.predict).parameters.items()
+            if par.default == inspect.Parameter.empty
+        ]
+
+        if ((args or kwargs) and batch) or not (args or kwargs or batch):
+            raise ValueError(
+                f"Please provide either {' and '.join(args_kwargs_names)}, OR a `batch`"
+            )
+
+        if args or kwargs:
+            batch = [self._map_args_kwargs_to_input(*args, **kwargs)]
+
+        prediction_config = PredictionConfiguration(
+            add_tokens=add_tokens,
+            add_attributions=add_attributions,
+            attributions_kwargs=attributions_kwargs or {},
+        )
+
+        predictions = self._model.predict(batch, prediction_config)
+
+        return (
+            predictions[0].as_dict()
+            if (args or kwargs)
+            else [prediction.as_dict() for prediction in predictions]
+        )
+
+    def _map_args_kwargs_to_input(self, *args, **kwargs) -> Dict[str, Any]:
+        """Helper function for the `self.predict` method"""
+        input_dict = {k: v for k, v in zip(self.inputs, args)}
+        input_dict.update(kwargs)
+
+        return input_dict
 
     def evaluate(
         self,
@@ -631,19 +688,6 @@ class Pipeline:
         finally:
             self._model.to(prior_device if prior_device >= 0 else "cpu")
 
-    def serve(self, port: int = 9998):
-        """Launches a REST prediction service with the current model
-
-        Parameters
-        ----------
-        port: `int`
-            The port on which the prediction service will be running (default: 9998)
-        """
-        from ._helpers import _serve
-
-        self._model = self._model.eval()
-        return _serve(self, port)
-
     def set_head(self, type: Type[TaskHead], **kwargs):
         """Sets a new task head for the pipeline
 
@@ -660,102 +704,134 @@ class Pipeline:
         self._config.head = TaskHeadConfiguration(type=type, **kwargs)
         self._model.set_head(self._config.head.compile(backbone=self.backbone))
 
-    @property
-    def name(self) -> str:
-        """Gets the pipeline name"""
-        return self._model.name
-
-    @property
-    def inputs(self) -> List[str]:
-        """Gets the pipeline input field names"""
-        return self._model.inputs
-
-    @property
-    def output(self) -> List[str]:
-        """Gets the pipeline output field names"""
-        return self._model.output
-
-    @property
-    def backbone(self) -> ModelBackbone:
-        """Gets the model backbone of the pipeline"""
-        return self.head.backbone
-
-    @property
-    def head(self) -> TaskHead:
-        """Gets the pipeline task head"""
-        return self._model.head
-
-    @property
-    def vocab(self) -> Vocabulary:
-        """Gets the pipeline vocabulary"""
-        return self._model.vocab
-
-    @property
-    def config(self) -> PipelineConfiguration:
-        """Gets the pipeline configuration"""
-        return self._config
-
-    @property
-    def type_name(self) -> str:
-        """The pipeline name. Equivalent to task head name"""
-        return self.head.__class__.__name__
-
-    @property
-    def num_trainable_parameters(self) -> int:
-        """Number of trainable parameters present in the model.
-
-        At training time, this number can change when freezing/unfreezing certain parameter groups.
-        """
-        if vocabulary.is_empty(self.vocab, self.config.features.configured_namespaces):
-            self.__LOGGER.warning(
-                "At least one vocabulary of your features is still empty! "
-                "The number of trainable parameters usually depends on the size of your vocabulary."
-            )
-        return sum(p.numel() for p in self._model.parameters() if p.requires_grad)
-
-    @property
-    def num_parameters(self) -> int:
-        """Number of parameters present in the model."""
-        if vocabulary.is_empty(self.vocab, self.config.features.configured_namespaces):
-            self.__LOGGER.warning(
-                "At least one vocabulary of your features is still empty! "
-                "The number of trainable parameters usually depends on the size of your vocabulary."
-            )
-        return sum(p.numel() for p in self._model.parameters())
-
-    @property
-    def named_trainable_parameters(self) -> List[str]:
-        """Returns the names of the trainable parameters in the pipeline"""
-        return [name for name, p in self._model.named_parameters() if p.requires_grad]
-
-    def model_parameters(self):
+    def model_parameters(self) -> Iterator[Tuple[str, torch.Tensor]]:
         """Returns an iterator over all model parameters, yielding the name and the parameter itself.
 
-        You can use this to freeze certain parameters in the training, example:
-        >>> for name, parameter in self.model_parameters():
-        >>>     if not name.endswith("bias"):
-        >>>         parameter.requires_grad = False
+        Examples
+        --------
+        You can use this to freeze certain parameters in the training:
+
+        >>> pipeline = Pipeline.from_config({
+        ...     "name": "model_parameters_example",
+        ...     "head": {"type": "TextClassification", "labels": ["a", "b"]},
+        ... })
+        >>> for name, parameter in pipeline.model_parameters():
+        ...     if not name.endswith("bias"):
+        ...         parameter.requires_grad = False
+
         """
         return self._model.named_parameters()
 
-    @property
-    def model_path(self) -> str:
-        """Returns the file path to the serialized version of the last trained model"""
-        return self._model.file_path
-
-    def _update_prediction_signatures(self):
-        """Fixes the `self.predict` signature to match the model inputs for interactive work-flows"""
-        new_signature = inspect.Signature(
-            [
-                Parameter(name=_input, kind=Parameter.POSITIONAL_OR_KEYWORD)
-                for _input in self.inputs
-            ]
+    def copy(self) -> "Pipeline":
+        """Returns a copy of the pipeline"""
+        model = PipelineModel.from_params(
+            Params({"config": self.config}), vocab=copy.deepcopy(self.vocab)
         )
+        config = copy.deepcopy(self._config)
 
-        for method in [self.predict, self.explain]:
-            self.__setattr__(
-                method.__name__, update_method_signature(new_signature, method)
-            )
+        pipeline_copy = Pipeline(model, config)
+        pipeline_copy._model.load_state_dict(self._model.state_dict())
+
+        return pipeline_copy
+
+    def save(self, directory: Union[str, Path]) -> str:
+        """Saves the pipeline in the given directory as `model.tar.gz` file.
+
+        Parameters
+        ----------
+        directory
+            Save the 'model.tar.gz' file to this directory.
+
+        Returns
+        -------
+        file_path
+            Path to the 'model.tar.gz' file.
+        """
+        if isinstance(directory, str):
+            directory = Path(directory)
+
+        directory.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            self.vocab.save_to_files(str(temp_path / "vocabulary"))
+            torch.save(self._model.state_dict(), temp_path / "best.th")
+            with (temp_path / "config.json").open("w") as file:
+                json.dump(
+                    {
+                        "model": {
+                            "config": self.config.as_dict(),
+                            "type": "PipelineModel",
+                        }
+                    },
+                    file,
+                    indent=4,
+                )
+            archive_model(temp_path, archive_path=directory)
+
+        return str(directory / "model.tar.gz")
+
+    def to_mlflow(
+        self,
+        tracking_uri: Optional[str] = None,
+        experiment_id: Optional[int] = None,
+        run_name: str = "Log biome.text model",
+    ) -> str:
+        """Logs the pipeline as MLFlow Model to a MLFlow Tracking server
+
+        Parameters
+        ----------
+        tracking_uri
+            The URI of the MLFlow tracking server. MLFlow defaults to './mlruns'.
+        experiment_id
+            ID of the experiment under which to create the logging run. If this argument is unspecified,
+            will look for valid experiment in the following order: activated using `mlflow.set_experiment`,
+            `MLFLOW_EXPERIMENT_NAME` environment variable, `MLFLOW_EXPERIMENT_ID` environment variable,
+            or the default experiment as defined by the tracking server.
+        run_name
+            The name of the MLFlow run logging the model
+
+        Returns
+        -------
+        model_uri
+            The URI of the logged MLFlow model. The model gets logged as an artifact to the corresponding run.
+
+        Examples
+        --------
+        After logging the pipeline to MLFlow you can use the MLFlow model for inference:
+        >>> import mlflow, pandas, biome.text
+        >>> pipeline = biome.text.Pipeline.from_config({
+        ...     "name": "to_mlflow_example",
+        ...     "head": {"type": "TextClassification", "labels": ["a", "b"]},
+        ... })
+        >>> model_uri = pipeline.to_mlflow()
+        >>> model = mlflow.pyfunc.load_model(model_uri)
+        >>> prediction: pandas.DataFrame = model.predict(pandas.DataFrame([{"text": "Test this text"}]))
+        """
+        if tracking_uri:
+            mlflow.set_tracking_uri(tracking_uri)
+
+        # This conda environment is only needed when serving the model later on with `mlflow models serve`
+        conda_env = {
+            "name": "mlflow-dev",
+            "channels": ["defaults", "conda-forge"],
+            "dependencies": ["python=3.7.9", "pip>=20.3.0", {"pip": ["biome-text"]}],
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir_name:
+            file_path = self.save(directory=tmpdir_name)
+
+            with mlflow.start_run(
+                experiment_id=experiment_id, run_name=run_name
+            ) as run:
+                mlflow.pyfunc.log_model(
+                    artifact_path="BiomeTextModel",
+                    loader_module="biome.text.mlflow_model",
+                    data_path=file_path,
+                    conda_env=conda_env,
+                )
+                model_uri = os.path.join(run.info.artifact_uri, "BiomeTextModel")
+
+        return model_uri
 
     @staticmethod
     def _add_transformers_vocab_if_needed(model: PipelineModel):
@@ -792,6 +868,8 @@ class Pipeline:
         config = archive.config["model"]["config"]
         return PipelineConfiguration.from_params(config)
 
+    # deprecated methods:
+
     def create_vocabulary(self, config: VocabularyConfiguration) -> None:
         """Creates the vocabulary for the pipeline from scratch
 
@@ -804,6 +882,24 @@ class Pipeline:
             Specifies the sources of the vocabulary and how to extract it
         """
         raise DeprecationWarning(
-            "The vocabulary is now created automatically and this method will be removed in the future. "
+            "The vocabulary is created automatically and this method will be removed in the future. "
             "You can directly pass on a `VocabularyConfiguration` to the `train` method or use its default."
+        )
+
+    def predict_batch(self, *args, **kwargs):
+        """DEPRECATED"""
+        raise DeprecationWarning(
+            "Use `self.predict(batch=...)` instead. This method will be removed in the future."
+        )
+
+    def explain(self, *args, **kwargs):
+        """DEPRECATED"""
+        raise DeprecationWarning(
+            "Use `self.predict(..., add_attributions=True)` instead. This method will be removed in the future."
+        )
+
+    def explain_batch(self, *args, **kwargs):
+        """DEPRECATED"""
+        raise DeprecationWarning(
+            "Use `self.predict(batch=..., add_attributions=True)` instead. This method will be removed in the future."
         )
