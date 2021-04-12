@@ -118,9 +118,7 @@ def test_text_classification(
     train_ds = train_valid_dataset[0]
     valid_ds = train_valid_dataset[1]
     trainer = TrainerConfiguration(**trainer_dict)
-    vocab_config = VocabularyConfiguration(
-        datasets=[train_ds], max_vocab_size={"word": 50}
-    )
+    vocab_config = VocabularyConfiguration(max_vocab_size={"word": 50})
 
     output = tmp_path / "output"
 
@@ -131,6 +129,10 @@ def test_text_classification(
         validation=valid_ds,
         vocab_config=vocab_config,
     )
+
+    evaluation = pl.evaluate(valid_ds)
+    assert evaluation["loss"] == pytest.approx(0.873307535648346, abs=0.003)
+
     assert pl.vocab.get_vocab_size(WordFeatures.namespace) == 52
     assert pl.vocab.get_vocab_size(CharFeatures.namespace) == 83
 

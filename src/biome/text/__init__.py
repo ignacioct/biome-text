@@ -35,11 +35,13 @@ try:
 except ModuleNotFoundError:
     pass
 
+from .configuration import LightningTrainerConfiguration
 from .configuration import PipelineConfiguration
 from .configuration import TrainerConfiguration
 from .configuration import VocabularyConfiguration
 from .dataset import Dataset
 from .pipeline import Pipeline
+from .trainer import Trainer
 
 warnings.showwarning = warn_explicit
 logging.basicConfig()

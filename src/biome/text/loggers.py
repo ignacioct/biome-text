@@ -1,5 +1,6 @@
 import dataclasses
 import logging
+import os
 from pathlib import Path
 from typing import Any
 from typing import Dict
@@ -12,7 +13,7 @@ from mlflow.entities import Experiment
 from mlflow.tracking import MlflowClient
 from mlflow.utils import mlflow_tags
 
-from biome.text.dataset import InstancesDataset
+from biome.text.dataset import InstanceDataset
 from biome.text.training_results import TrainingResults
 
 # We do not require wandb
@@ -38,9 +39,9 @@ class BaseTrainLogger(EpochCallback):
         self,
         pipeline: "Pipeline",
         trainer_configuration: "TrainerConfiguration",
-        training: InstancesDataset,
-        validation: Optional[InstancesDataset] = None,
-        test: Optional[InstancesDataset] = None,
+        training: InstanceDataset,
+        validation: Optional[InstanceDataset] = None,
+        test: Optional[InstanceDataset] = None,
     ):
         """Init train logging
 
@@ -156,9 +157,9 @@ class MlflowLogger(BaseTrainLogger):
         self,
         pipeline: "Pipeline",
         trainer_configuration: "TrainerConfiguration",
-        training: InstancesDataset,
-        validation: Optional[InstancesDataset] = None,
-        test: Optional[InstancesDataset] = None,
+        training: InstanceDataset,
+        validation: Optional[InstanceDataset] = None,
+        test: Optional[InstanceDataset] = None,
     ):
         from pandas import json_normalize
 
@@ -205,6 +206,7 @@ class WandBLogger(BaseTrainLogger):
     ----------
     project_name
         Name of your WandB project
+        The environment variable 'WANDB_PROJECT' will override this value.
     run_name
         Name of your run
     tags
@@ -220,7 +222,7 @@ class WandBLogger(BaseTrainLogger):
                 "Run `wandb login` or `import wandb; wandb.login()` or set the WANDB_API_KEY env variable."
             )
 
-        self.project_name = project_name
+        self.project_name = os.environ.get("WANDB_PROJECT") or project_name
         self.run_name = run_name
         self.tags = tags
 
@@ -230,9 +232,9 @@ class WandBLogger(BaseTrainLogger):
         self,
         pipeline: "Pipeline",
         trainer_configuration: "TrainerConfiguration",
-        training: InstancesDataset,
-        validation: Optional[InstancesDataset] = None,
-        test: Optional[InstancesDataset] = None,
+        training: InstanceDataset,
+        validation: Optional[InstanceDataset] = None,
+        test: Optional[InstanceDataset] = None,
     ):
         config = {
             "pipeline": pipeline.config.as_dict(),

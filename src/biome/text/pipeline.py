@@ -9,6 +9,7 @@ from inspect import Parameter
 from pathlib import Path
 from typing import Any
 from typing import Dict
+from typing import Iterable
 from typing import Iterator
 from typing import List
 from typing import Optional
@@ -21,9 +22,7 @@ import mlflow
 import numpy
 import torch
 from allennlp.commands.find_learning_rate import search_learning_rate
-from allennlp.common import Params
 from allennlp.common.file_utils import is_url_or_existing_file
-from allennlp.data import AllennlpLazyDataset
 from allennlp.data import Vocabulary
 from allennlp.models import load_archive
 from allennlp.models.archival import Archive
@@ -31,7 +30,6 @@ from allennlp.models.archival import archive_model
 from allennlp.training.util import evaluate
 
 from biome.text import vocabulary
-from biome.text._model import PipelineModel
 from biome.text.backbone import ModelBackbone
 from biome.text.configuration import FindLRConfiguration
 from biome.text.configuration import PipelineConfiguration
@@ -39,13 +37,15 @@ from biome.text.configuration import PredictionConfiguration
 from biome.text.configuration import TrainerConfiguration
 from biome.text.configuration import VocabularyConfiguration
 from biome.text.dataset import Dataset
-from biome.text.dataset import InstancesDataset
+from biome.text.dataset import InstanceDataset
 from biome.text.errors import EmptyVocabError
 from biome.text.features import TransformersFeatures
 from biome.text.features import WordFeatures
 from biome.text.helpers import update_method_signature
 from biome.text.loggers import BaseTrainLogger
 from biome.text.loggers import add_default_wandb_logger_if_needed
+from biome.text.mlflow_model import BiomeTextModel
+from biome.text.model import PipelineModel
 from biome.text.modules.heads import TaskHead
 from biome.text.modules.heads import TaskHeadConfiguration
 from biome.text.training_results import TrainingResults
@@ -127,19 +127,20 @@ class Pipeline:
         pipeline
             A configured pipeline
         """
-        if isinstance(config, dict):
-            config = PipelineConfiguration.from_dict(config)
+        if isinstance(config, PipelineConfiguration):
+            config = config.as_dict()
 
-        model = PipelineModel.from_params(
-            Params({"config": config}),
+        model = PipelineModel(
+            config=config,
             vocab=Vocabulary.from_files(vocab_path) if vocab_path is not None else None,
         )
+
         if not isinstance(model, PipelineModel):
             raise TypeError(f"Cannot load model. Wrong format of {model}")
 
         cls._add_transformers_vocab_if_needed(model)
 
-        return cls(model, config)
+        return cls(model, PipelineConfiguration.from_dict(config))
 
     @classmethod
     def from_pretrained(cls, path: Union[str, Path]) -> "Pipeline":
@@ -204,6 +205,11 @@ class Pipeline:
     def config(self) -> PipelineConfiguration:
         """Gets the pipeline configuration"""
         return self._config
+
+    @property
+    def model(self) -> PipelineModel:
+        """Gets the underlying model"""
+        return self._model
 
     @property
     def type_name(self) -> str:
@@ -276,7 +282,7 @@ class Pipeline:
         self,
         trainer_config: TrainerConfiguration,
         find_lr_config: FindLRConfiguration,
-        training_data: Union[Dataset, InstancesDataset],
+        training_data: Dataset,
         vocab_config: Optional[Union[VocabularyConfiguration, str]] = "default",
         lazy: bool = False,
     ):
@@ -295,10 +301,9 @@ class Pipeline:
         training_data
             The training data
         vocab_config
-            A `VocabularyConfiguration` to create/extend the pipeline's vocabulary if necessary.
-            If 'default' (str), we will use the default configuration
-            `VocabularyConfiguration(datasets=[training_data])`.
-            If None, we will leave the pipeline's vocabulary untouched.
+            A `VocabularyConfiguration` to create/extend the pipeline's vocabulary.
+            If 'default' (str), we will use the default configuration `VocabularyConfiguration()`.
+            If None, we will leave the pipeline's vocabulary untouched. Default: 'default'.
         lazy
             If true, dataset instances are lazily loaded from disk, otherwise they are loaded and kept in memory.
 
@@ -310,15 +315,19 @@ class Pipeline:
         """
         from biome.text._helpers import create_trainer_for_finding_lr
 
-        self._prepare_vocab(
-            vocab_config=vocab_config, training_data=training_data, lazy=lazy
-        )
+        training_data = training_data.to_instances(pipeline=self, lazy=lazy)
 
-        if isinstance(training_data, Dataset):
-            training_data: AllennlpLazyDataset = training_data.to_instances(
-                pipeline=self,
-                lazy=lazy,
+        # create vocab
+        if vocab_config is not None:
+            self.create_vocab(
+                [training_data],
+                config=vocab_config if vocab_config != "default" else None,
             )
+        if vocabulary.is_empty(self.vocab, self.config.features.configured_namespaces):
+            raise EmptyVocabError(
+                "All your features need a non-empty vocabulary for a learning rate scan!"
+            )
+
         training_data.index_with(self._model.vocab)
 
         trainer = create_trainer_for_finding_lr(
@@ -349,10 +358,10 @@ class Pipeline:
     def train(
         self,
         output: str,
-        training: Union[Dataset, InstancesDataset],
+        training: Dataset,
         trainer: Optional[TrainerConfiguration] = None,
-        validation: Optional[Union[Dataset, InstancesDataset]] = None,
-        test: Optional[Union[Dataset, InstancesDataset]] = None,
+        validation: Optional[Dataset] = None,
+        test: Optional[Dataset] = None,
         vocab_config: Optional[Union[VocabularyConfiguration, str]] = "default",
         loggers: List[BaseTrainLogger] = None,
         lazy: bool = False,
@@ -374,9 +383,9 @@ class Pipeline:
         test
             The test Dataset (optional)
         vocab_config
-            A `VocabularyConfiguration` to create/extend the pipeline's vocabulary if necessary.
-            If 'default' (str), we will use the default configuration `VocabularyConfiguration(datasets=[training])`.
-            If None, we will leave the pipeline's vocabulary untouched.
+            A `VocabularyConfiguration` to create/extend the pipeline's vocabulary.
+            If 'default' (str), we will use the default configuration `VocabularyConfiguration()`.
+            If None, we will leave the pipeline's vocabulary untouched. Default: 'default'.
         loggers
             A list of loggers that execute a callback before the training, after each epoch,
             and at the end of the training (see `biome.text.logger.MlflowLogger`, for example)
@@ -404,19 +413,32 @@ class Pipeline:
         try:
             self.__configure_training_logging(output, quiet)
 
-            self._prepare_vocab(
-                vocabulary_folder=os.path.join(output, "vocabulary")
-                if restore
-                else None,
-                vocab_config=vocab_config,
-                training_data=training,
-                lazy=lazy,
-            )
+            # create instances
+            datasets = {"training": training.to_instances(self, lazy=lazy)}
+            if validation:
+                datasets["validation"] = validation.to_instances(self, lazy=lazy)
+            if test:
+                datasets["test"] = test.to_instances(self, lazy=lazy)
 
-            datasets = {"training": training, "validation": validation, "test": test}
-            for name, dataset in datasets.items():
-                if isinstance(dataset, Dataset):
-                    datasets[name] = dataset.to_instances(pipeline=self, lazy=lazy)
+            # create vocab
+            if restore:
+                self._restore_vocab(os.path.join(output, "vocabulary"))
+            elif vocab_config is not None:
+                vocab_config = (
+                    VocabularyConfiguration()
+                    if vocab_config == "default"
+                    else vocab_config
+                )
+                vocab_datasets = [datasets["training"]]
+                if datasets.get("validation") and vocab_config.include_valid_data:
+                    vocab_datasets += [datasets["validation"]]
+                self.create_vocab(vocab_datasets, config=vocab_config)
+            if vocabulary.is_empty(
+                self.vocab, self.config.features.configured_namespaces
+            ):
+                raise EmptyVocabError(
+                    "All your features need a non-empty vocabulary for a training!"
+                )
 
             loggers = loggers or []
             loggers = add_default_wandb_logger_if_needed(loggers)
@@ -437,35 +459,61 @@ class Pipeline:
         finally:
             self.__restore_training_logging()
 
-    def _prepare_vocab(
+    def create_vocab(
         self,
-        vocabulary_folder: Optional[str] = None,
-        vocab_config: Optional[Union[str, VocabularyConfiguration]] = "default",
-        training_data: Optional[Dataset] = None,
-        lazy: bool = False,
-    ):
-        """Prepare and set the vocab for a training or learning rate scan.
+        instance_datasets: Iterable[InstanceDataset],
+        config: Optional[VocabularyConfiguration] = None,
+    ) -> Vocabulary:
+        """Creates and updates the vocab of the pipeline.
+
+        NOTE: The trainer calls this method for you. You can use this method in case you want
+        to create the vocab outside of the training process.
 
         Parameters
         ----------
-        vocabulary_folder
-            If specified, load the vocab from this folder
-        vocab_config
-            A `VocabularyConfiguration` to create/extend the pipeline's vocabulary if necessary.
-            If 'default' (str), we will use the default configuration
-            `VocabularyConfiguration(datasets=[training_data])`.
-            If None, we will leave the pipeline's vocabulary untouched.
-        training_data
-            The training data in case we need to construct the default config
-        lazy
-            If true, dataset instances are lazily loaded from disk, otherwise they are loaded and kept in memory.
+        instance_datasets
+            A list of instance datasets from which to create the vocabulary.
+        config
+            Configurations for the vocab creation. Default: `VocabularyConfiguration()`.
+
+        Examples
+        --------
+        >>> from biome.text import Pipeline, Dataset
+        >>> pl = Pipeline.from_config(
+        ...     {"name": "example", "head":{"type": "TextClassification", "labels": ["pos", "neg"]}}
+        ... )
+        >>> dataset = Dataset.from_dict({"text": ["Just an example"], "label": ["pos"]})
+        >>> instance_dataset = dataset.to_instances(pl)
+        >>> vocab = pl.create_vocab([instance_dataset])
         """
-        # The transformers feature comes with its own vocab, no need to prepare anything if it is the only feature
+        # The transformers feature comes with its own vocab, no need to create anything if it is the only feature
         if self.config.features.configured_namespaces == [
             TransformersFeatures.namespace
         ]:
-            return
+            return self.vocab
 
+        self._check_for_word_vector_weights_file()
+
+        config = config or VocabularyConfiguration()
+
+        vocab = Vocabulary.from_instances(
+            instances=(
+                instance for dataset in instance_datasets for instance in dataset
+            ),
+            max_vocab_size=config.max_vocab_size,
+            min_count=config.min_count,
+            pretrained_files=config.pretrained_files,
+            only_include_pretrained_words=config.only_include_pretrained_words,
+            min_pretrained_embeddings=config.min_pretrained_embeddings,
+            tokens_to_add=config.tokens_to_add,
+        )
+
+        # If the vocab is the same, this is just a no-op
+        self._model.extend_vocabulary(vocab)
+
+        return vocab
+
+    def _check_for_word_vector_weights_file(self):
         # If the vocab is empty, we assume this is an untrained pipeline
         # and we want to raise an error if the weights file is not found.
         # Extending the vocab with a non-existent weights file only throws a warning.
@@ -480,23 +528,19 @@ class Pipeline:
         except (AttributeError, TypeError):
             pass
 
-        if vocabulary_folder is not None:
-            self._model.extend_vocabulary(Vocabulary.from_files(vocabulary_folder))
-            vocab_config = None
+    def _restore_vocab(self, folder: str) -> Vocabulary:
+        # The transformers feature comes with its own vocab, no need to restore anything if it is the only feature
+        if self.config.features.configured_namespaces == [
+            TransformersFeatures.namespace
+        ]:
+            return self.vocab
 
-        vocab_config = (
-            VocabularyConfiguration(datasets=[training_data])
-            if vocab_config == "default"
-            else vocab_config
-        )
-        if vocab_config is not None:
-            vocab = vocab_config.build_vocab(pipeline=self, lazy=lazy)
-            self._model.extend_vocabulary(vocab)
+        self._check_for_word_vector_weights_file()
 
-        if vocabulary.is_empty(self.vocab, self.config.features.configured_namespaces):
-            raise EmptyVocabError(
-                "All your features need a non-empty vocabulary for a training!"
-            )
+        vocab = Vocabulary.from_files(folder)
+        self._model.extend_vocabulary(vocab)
+
+        return vocab
 
     @staticmethod
     def __restore_training_logging():
@@ -720,9 +764,7 @@ class Pipeline:
 
     def copy(self) -> "Pipeline":
         """Returns a copy of the pipeline"""
-        model = PipelineModel.from_params(
-            Params({"config": self.config}), vocab=copy.deepcopy(self.vocab)
-        )
+        model = PipelineModel(self._config.as_dict(), vocab=copy.deepcopy(self.vocab))
         config = copy.deepcopy(self._config)
 
         pipeline_copy = Pipeline(model, config)
@@ -770,7 +812,9 @@ class Pipeline:
         self,
         tracking_uri: Optional[str] = None,
         experiment_id: Optional[int] = None,
-        run_name: str = "Log biome.text model",
+        run_name: str = "log_biometext_model",
+        input_example: Optional[Dict] = None,
+        conda_env: Optional[Dict] = None,
     ) -> str:
         """Logs the pipeline as MLFlow Model to a MLFlow Tracking server
 
@@ -784,7 +828,17 @@ class Pipeline:
             `MLFLOW_EXPERIMENT_NAME` environment variable, `MLFLOW_EXPERIMENT_ID` environment variable,
             or the default experiment as defined by the tracking server.
         run_name
-            The name of the MLFlow run logging the model
+            The name of the MLFlow run logging the model. Default: 'log_biometext_model'.
+        input_example
+            You can provide an input example in the form of a dictionary. For example, for a TextClassification head
+            this would be `{"text": "This is an input example"}`.
+        conda_env
+            This conda environment is used when serving the model via `mlflow models serve`. Default:
+            conda_env = {
+                "name": "mlflow-dev",
+                "channels": ["defaults", "conda-forge"],
+                "dependencies": ["python=3.7.9", "pip>=20.3.0", {"pip": ["biome-text"]}],
+            }
 
         Returns
         -------
@@ -807,25 +861,31 @@ class Pipeline:
             mlflow.set_tracking_uri(tracking_uri)
 
         # This conda environment is only needed when serving the model later on with `mlflow models serve`
-        conda_env = {
+        conda_env = conda_env or {
             "name": "mlflow-dev",
             "channels": ["defaults", "conda-forge"],
             "dependencies": ["python=3.7.9", "pip>=20.3.0", {"pip": ["biome-text"]}],
         }
 
         with tempfile.TemporaryDirectory() as tmpdir_name:
-            file_path = self.save(directory=tmpdir_name)
+            file_path = Path(self.save(directory=tmpdir_name))
 
             with mlflow.start_run(
                 experiment_id=experiment_id, run_name=run_name
             ) as run:
+                mlflow.log_artifact(str(file_path), "biometext_pipeline")
                 mlflow.pyfunc.log_model(
-                    artifact_path="BiomeTextModel",
-                    loader_module="biome.text.mlflow_model",
-                    data_path=file_path,
+                    artifact_path="mlflow_model",
+                    python_model=BiomeTextModel(),
+                    artifacts={
+                        BiomeTextModel.ARTIFACT_CONTEXT: mlflow.get_artifact_uri(
+                            f"biometext_pipeline/{file_path.name}"
+                        )
+                    },
+                    input_example=input_example,
                     conda_env=conda_env,
                 )
-                model_uri = os.path.join(run.info.artifact_uri, "BiomeTextModel")
+                model_uri = os.path.join(run.info.artifact_uri, "mlflow_model")
 
         return model_uri
 

@@ -12,10 +12,10 @@ from typing import Dict
 from typing import Iterable
 from typing import List
 from typing import Optional
-from typing import Type
 from typing import Union
 
 import allennlp
+import pytorch_lightning as pl
 import torch
 from allennlp.common import Params
 from allennlp.common.util import sanitize
@@ -23,14 +23,14 @@ from allennlp.data import Instance
 from allennlp.data import Vocabulary
 from allennlp.models.archival import CONFIG_NAME
 
-from . import vocabulary
-from .backbone import ModelBackbone
-from .configuration import PipelineConfiguration
-from .configuration import PredictionConfiguration
-from .featurizer import FeaturizeError
-from .helpers import split_signature_params_by_predicate
-from .modules.heads import TaskHead
-from .modules.heads import TaskPrediction
+from biome.text import vocabulary
+from biome.text.backbone import ModelBackbone
+from biome.text.configuration import PipelineConfiguration
+from biome.text.configuration import PredictionConfiguration
+from biome.text.featurizer import FeaturizeError
+from biome.text.helpers import split_signature_params_by_predicate
+from biome.text.modules.heads import TaskHead
+from biome.text.modules.heads import TaskPrediction
 
 
 class _HashDict(dict):
@@ -53,7 +53,7 @@ class _HashList(list):
         return pickle.dumps(self).__hash__()
 
 
-class PipelineModel(allennlp.models.Model):
+class PipelineModel(allennlp.models.Model, pl.LightningModule):
     """
     This class represents pipeline model implementation for connect biome.text concepts with
     allennlp implementation details
@@ -63,10 +63,10 @@ class PipelineModel(allennlp.models.Model):
 
     Parameters
     ----------
-    name
-        Name of the pipeline model
-    head
-        TaskHead of the pipeline model
+    config
+        Configuration of the pipeline
+    vocab
+        The vocabulary of the pipeline. If None, an empty vocabulary will be created (default).
 
     Attributes
     ----------
@@ -85,16 +85,39 @@ class PipelineModel(allennlp.models.Model):
     """
 
     PREDICTION_FILE_NAME = "predictions.json"
+    TRAINING_METRICS_PREFIX = "training"
+    VALIDATION_METRICS_PREFIX = "validation"
     _LOGGER = logging.getLogger(__name__)
 
-    def __init__(self, name: str, head: TaskHead):
-        super().__init__(vocab=head.backbone.vocab)
+    def __init__(self, config: Dict, vocab: Optional[Vocabulary] = None):
+        super().__init__(vocab=vocab or vocabulary.create_empty_vocabulary())
 
-        self.name = name
+        # saves the config in the pl checkpoints
+        self.save_hyperparameters("config")
+
+        config = PipelineConfiguration.from_dict(config)
+        tokenizer = config.build_tokenizer()
+        featurizer = config.features.compile_featurizer(tokenizer)
+        embedder = config.build_embedder(self.vocab)
+        head = config.head.compile(
+            backbone=ModelBackbone(
+                self.vocab,
+                featurizer=featurizer,
+                embedder=embedder,
+                encoder=config.encoder,
+            )
+        )
+
+        self.name = config.name
         self._head = None
         self.set_head(head)
 
         self.file_path: Optional[str] = None
+
+        self.optimizer: Optional[torch.optim.Optimizer] = None
+        # The lr_scheduler dict follows the Lightning format:
+        # https://pytorch-lightning.readthedocs.io/en/stable/common/optimizers.html#learning-rate-scheduling
+        self.lr_scheduler: Optional[Dict] = None
 
     def _update_head_related_attributes(self):
         """Updates the inputs/outputs and default mapping attributes, calculated from model head"""
@@ -108,7 +131,7 @@ class PipelineModel(allennlp.models.Model):
 
     @classmethod
     def from_params(
-        cls: Type["PipelineModel"],
+        cls: "PipelineModel",
         params: Params,
         vocab: Optional[Vocabulary] = None,
         **extras,
@@ -132,26 +155,8 @@ class PipelineModel(allennlp.models.Model):
         pipeline_model
         """
 
-        config = params.pop("config")
-        if not isinstance(config, PipelineConfiguration):
-            config = PipelineConfiguration.from_params(config)
-
-        vocab = vocab or vocabulary.create_empty_vocabulary()
-        tokenizer = config.build_tokenizer()
-        featurizer = config.features.compile_featurizer(tokenizer)
-        embedder = config.build_embedder(vocab)
-
-        return cls(
-            name=config.name,
-            head=config.head.compile(
-                backbone=ModelBackbone(
-                    vocab,
-                    featurizer=featurizer,
-                    embedder=embedder,
-                    encoder=config.encoder,
-                )
-            ),
-        )
+        config = params.pop("config", keep_as_dict=True)
+        return cls(config=config, vocab=vocab)
 
     @property
     def head(self) -> TaskHead:
@@ -165,7 +170,7 @@ class PipelineModel(allennlp.models.Model):
 
     def forward(self, *args, **kwargs) -> Dict[str, torch.Tensor]:
         """The main forward method just wraps the head forward method"""
-        return self._head.forward(*args, **kwargs)
+        return self._head(*args, **kwargs)
 
     def get_metrics(self, reset: bool = False) -> Dict[str, float]:
         """Fetch metrics defined in head layer"""
@@ -308,6 +313,7 @@ class PipelineModel(allennlp.models.Model):
         """Returns predictions given some input data based on the current state of the model
 
         The keys of the input dicts in the batch must coincide with the `self.inputs` attribute.
+        TODO: Comply with LightningModule API + Trainer API (means move instance creation logic to Pipeline)
 
         Parameters
         ----------
@@ -370,6 +376,78 @@ class PipelineModel(allennlp.models.Model):
             self._log_predictions(batch, predictions)
 
         return predictions
+
+    def training_step(self, batch, batch_idx) -> Dict:
+        output = self(**batch)
+        self.log(
+            "training_loss",
+            output["loss"],
+            on_step=True,
+            prog_bar=False,
+            on_epoch=False,
+        )
+
+        metrics = self.get_metrics()
+        for key, val in metrics.items():
+            self.log(
+                ("training" if key.startswith("_") else "training_") + key,
+                val,
+                on_step=True,
+                prog_bar=not key.startswith("_"),
+                on_epoch=False,
+            )
+
+        return output
+
+    def training_epoch_end(self, outputs: List[Any]) -> None:
+        metrics = self.get_metrics(reset=True)
+        for key, val in metrics.items():
+            if key.startswith("_"):
+                metric_name = self.TRAINING_METRICS_PREFIX + key
+            else:
+                metric_name = self.TRAINING_METRICS_PREFIX + "_" + key
+            self.log(
+                metric_name,
+                val,
+                on_step=False,
+                prog_bar=False,
+                on_epoch=True,
+            )
+
+    def validation_step(self, batch, batch_idx) -> Dict:
+        output = self(**batch)
+        self.get_metrics()
+
+        return output
+
+    def validation_epoch_end(self, outputs: List[Any]) -> None:
+        averaged_epoch_loss = sum([output["loss"] for output in outputs]) / len(outputs)
+        self.log(
+            "validation_loss",
+            averaged_epoch_loss,
+            on_step=False,
+            prog_bar=True,
+            on_epoch=True,
+        )
+
+        metrics = self.get_metrics(reset=True)
+        for key, val in metrics.items():
+            if key.startswith("_"):
+                metric_name = self.VALIDATION_METRICS_PREFIX + key
+            else:
+                metric_name = self.VALIDATION_METRICS_PREFIX + "_" + key
+            self.log(
+                metric_name,
+                val,
+                on_step=False,
+                prog_bar=not key.startswith("_"),
+                on_epoch=True,
+            )
+
+    def configure_optimizers(self):
+        if self.lr_scheduler is None:
+            return self.optimizer
+        return [self.optimizer], [self.lr_scheduler]
 
 
 allennlp.models.Model.register(PipelineModel.__name__, exist_ok=True)(PipelineModel)

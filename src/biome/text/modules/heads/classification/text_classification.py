@@ -16,7 +16,6 @@ from allennlp.nn.util import get_text_field_mask
 from captum.attr import IntegratedGradients
 
 from biome.text.backbone import ModelBackbone
-from biome.text.featurizer import FeaturizeError
 from biome.text.modules.configuration import ComponentConfiguration
 from biome.text.modules.configuration import FeedForwardConfiguration
 from biome.text.modules.configuration import Seq2VecEncoderConfiguration
@@ -28,6 +27,22 @@ from biome.text.modules.heads.task_prediction import TextClassificationPredictio
 class TextClassification(ClassificationHead):
     """
     Task head for text classification
+
+    Parameters
+    ----------
+    backbone
+        The backbone of your model. Must not be provided when initiating with `Pipeline.from_config`.
+    labels
+        A list of labels for your classification task.
+    pooler
+        The pooler of the output sequence from the backbone model. Default: `BagOfEmbeddingsEncoder`.
+    feedforward
+        An optional feedforward layer applied to the output of the pooler. Default: None.
+    multilabel
+        Is this a multi label classification task? Default: False
+    label_weights
+        A list of weights for each label. The weights must be in the same order as the `labels`.
+        You can also provide a dictionary that maps the label to its weight. Default: None.
     """
 
     label_name = "label"
@@ -41,9 +56,10 @@ class TextClassification(ClassificationHead):
         pooler: Optional[Seq2VecEncoderConfiguration] = None,
         feedforward: Optional[FeedForwardConfiguration] = None,
         multilabel: bool = False,
+        label_weights: Optional[Union[List[float], Dict[str, float]]] = None,
     ) -> None:
 
-        super(TextClassification, self).__init__(backbone, labels, multilabel)
+        super().__init__(backbone, labels, multilabel, label_weights=label_weights)
 
         self.pooler = (
             pooler.input_dim(self.backbone.encoder.get_output_dim()).compile()
