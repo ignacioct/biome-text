@@ -1,7 +1,3 @@
-import logging
-import warnings
-from warnings import warn_explicit
-
 import pkg_resources
 
 try:
@@ -10,38 +6,27 @@ except pkg_resources.DistributionNotFound:
     # package is not installed
     pass
 
-try:
-    import tqdm
+import logging
 
-    class TqdmWrapper(tqdm.tqdm):
-        """
-        A tqdm wrapper for progress bar disable control
+# configure basic 'biome.text' logging
+_handler = logging.StreamHandler()
+_handler.setFormatter(
+    logging.Formatter("%(levelname)s:%(name)s: %(message)s")
+)  # "%(levelname)s: %(message)s"))
+_LOGGER = logging.getLogger(__name__)
+_LOGGER.addHandler(_handler)
+_LOGGER.setLevel("INFO")
+# configure 'allennlp' logging
+_ALLENNLP_LOGGER = logging.getLogger("allennlp")
+_ALLENNLP_LOGGER.addHandler(_handler)
+_ALLENNLP_LOGGER.setLevel("WARNING")
+# configure 'elasticsearch' logging
+logging.getLogger("elasticsearch").setLevel("ERROR")
 
-        We must use this wrapper before any tqdm import (so, before any allennlp import). It's why we
-        must define at top package module level
-
-        We could discard this behaviour when this PR is merged: https://github.com/tqdm/tqdm/pull/950
-        and then just environment vars instead.
-
-        """
-
-        disable: bool = False
-
-        def __init__(self, *args, **kwargs):
-            kwargs["disable"] = TqdmWrapper.disable
-            super(TqdmWrapper, self).__init__(*args, **kwargs)
-
-    tqdm.tqdm = TqdmWrapper
-except ModuleNotFoundError:
-    pass
-
-from .configuration import LightningTrainerConfiguration
+from .configuration import AllenNLPTrainerConfiguration
 from .configuration import PipelineConfiguration
 from .configuration import TrainerConfiguration
 from .configuration import VocabularyConfiguration
 from .dataset import Dataset
 from .pipeline import Pipeline
 from .trainer import Trainer
-
-warnings.showwarning = warn_explicit
-logging.basicConfig()

@@ -1,3 +1,4 @@
+import json
 import logging
 import math
 import os
@@ -12,6 +13,7 @@ from typing import Union
 import pytorch_lightning as pl
 import torch
 from allennlp.common import Params
+from allennlp.common.util import sanitize
 from allennlp.data import PyTorchDataLoader
 from allennlp.data.samplers import BucketBatchSampler
 from allennlp.training.optimizers import Optimizer
@@ -29,7 +31,7 @@ from transformers.optimization import get_constant_schedule_with_warmup
 from transformers.optimization import get_cosine_schedule_with_warmup
 from transformers.optimization import get_linear_schedule_with_warmup
 
-from biome.text.configuration import LightningTrainerConfiguration
+from biome.text.configuration import TrainerConfiguration
 from biome.text.configuration import VocabularyConfiguration
 from biome.text.dataset import Dataset
 from biome.text.dataset import InstanceDataset
@@ -67,37 +69,68 @@ class Trainer:
     valid_dataset
         The validation dataset. Default: `None`.
     trainer_config
-        The configuration of the trainer. Default: `LightningTrainerConfiguration()`.
+        The configuration of the trainer. Default: `TrainerConfiguration()`.
     vocab_config
         A `VocabularyConfiguration` to create/extend the pipeline's vocabulary.
         If `"default"` (str), we will use the default configuration `VocabularyConfiguration()`.
         If None, we will leave the pipeline's vocabulary untouched. Default: `"default"`.
     lazy
-        If True, instances are lazily loaded from disk, otherwise they are loaded into memory. Default: False.
+        If True, instances are lazily loaded from disk, otherwise they are loaded into memory.
+        Ignored when passing in `InstanceDataset`s. Default: False.
     """
 
     def __init__(
         self,
         pipeline: Pipeline,
-        train_dataset: Dataset,
-        valid_dataset: Optional[Dataset] = None,
-        trainer_config: Optional[LightningTrainerConfiguration] = None,
+        train_dataset: Union[Dataset, InstanceDataset],
+        valid_dataset: Optional[Union[Dataset, InstanceDataset]] = None,
+        trainer_config: Optional[TrainerConfiguration] = None,
         vocab_config: Optional[Union[str, VocabularyConfiguration]] = "default",
         lazy: bool = False,
     ):
         self._pipeline = pipeline
-        self._train_dataset = train_dataset
-        self._valid_dataset = valid_dataset
         # since we will make changes to the config, better to make a copy -> asdict returns a deep copy
         self._trainer_config = (
-            LightningTrainerConfiguration(**asdict(trainer_config))
+            TrainerConfiguration(**asdict(trainer_config))
             if trainer_config is not None
-            else LightningTrainerConfiguration()
+            else TrainerConfiguration()
         )
         self._vocab_config: Optional[VocabularyConfiguration] = (
             VocabularyConfiguration() if vocab_config == "default" else vocab_config
         )
         self._lazy = lazy
+
+        # create instances
+        if isinstance(train_dataset, Dataset):
+            self._train_instances = train_dataset.to_instances(
+                self._pipeline, lazy=self._lazy, tqdm_desc="Loading training instances"
+            )
+        else:
+            self._train_instances = train_dataset
+
+        if isinstance(valid_dataset, Dataset):
+            self._valid_instances = valid_dataset.to_instances(
+                self._pipeline,
+                lazy=self._lazy,
+                tqdm_desc="Loading validation instances",
+            )
+        else:
+            self._valid_instances = valid_dataset
+
+        # create vocab
+        vocab_config = (
+            VocabularyConfiguration()
+            if self._vocab_config == "default"
+            else self._vocab_config
+        )
+        if vocab_config is not None:
+            vocab_datasets = [self._train_instances]
+            if (
+                self._valid_instances is not None
+                and self._vocab_config.include_valid_data
+            ):
+                vocab_datasets += [self._valid_instances]
+            self._pipeline.create_vocab(vocab_datasets, config=vocab_config)
 
         # we give some special attention to these loggers/callbacks
         self._wandb_logger: Optional[WandbLogger] = None
@@ -110,7 +143,7 @@ class Trainer:
         if self._trainer_config.gpus is None and torch.cuda.is_available():
             self._trainer_config.gpus = 1
 
-        # create optimizer
+        # create optimizer, has to come AFTER creating the vocab!
         self._pipeline.model.optimizer = Optimizer.from_params(
             Params(
                 {
@@ -120,12 +153,18 @@ class Trainer:
             )
         )
 
-        # create lr scheduler
+        # create lr scheduler, has to come AFTER creating the optimizer!
         if not (
             self._trainer_config.warmup_steps == 0
             and self._trainer_config.lr_decay is None
         ):
             self._pipeline.model.lr_scheduler = self._create_lr_scheduler()
+        else:
+            self._pipeline.model.lr_scheduler = None
+
+        # set monitor and mode for best validation metrics
+        self._pipeline.model.monitor = self._trainer_config.monitor
+        self._pipeline.model.monitor_mode = self._trainer_config.monitor_mode
 
         self.trainer = pl.Trainer(**self._trainer_config.lightning_params)
 
@@ -170,7 +209,8 @@ class Trainer:
             and not get_loggers_of_type(WandbLogger)
         ):
             self._wandb_logger = WandbLogger(
-                save_dir=self._trainer_config.default_root_dir, project="biome"
+                save_dir=self._trainer_config.default_root_dir,
+                project=os.environ.get("WANDB_PROJECT", "biome"),
             )
             loggers.append(self._wandb_logger)
         elif get_loggers_of_type(WandbLogger):
@@ -203,11 +243,11 @@ class Trainer:
         if self._trainer_config.checkpoint_callback and not get_callbacks_of_type(
             ModelCheckpoint
         ):
-            monitor = self._trainer_config.monitor if self._valid_dataset else None
+            monitor = self._trainer_config.monitor if self._valid_instances else None
             mode = self._trainer_config.monitor_mode
             save_top_k = (
                 self._trainer_config.save_top_k_checkpoints
-                if self._valid_dataset
+                if self._valid_instances
                 else None
             )
             self._model_checkpoint = ModelCheckpointWithVocab(
@@ -220,7 +260,7 @@ class Trainer:
         # early stopping
         if (
             self._trainer_config.add_early_stopping
-            and self._valid_dataset is not None
+            and self._valid_instances is not None
             and not get_callbacks_of_type(EarlyStopping)
         ):
             callbacks.append(
@@ -232,6 +272,11 @@ class Trainer:
             )
 
         # lr monitor
+        if self._trainer_config.add_lr_monitor is None and (
+            self._trainer_config.warmup_steps != 0
+            or self._trainer_config.lr_decay is not None
+        ):
+            self._trainer_config.add_lr_monitor = True
         if self._trainer_config.add_lr_monitor and not get_callbacks_of_type(
             LearningRateMonitor
         ):
@@ -245,7 +290,7 @@ class Trainer:
         Possibilities: constant/linear/cosine schedule with or without warmup
         """
         steps_per_epoch = math.ceil(
-            len(self._train_dataset) / self._trainer_config.batch_size
+            len(self._train_instances) / self._trainer_config.batch_size
         )
         try:
             training_steps = min(
@@ -289,6 +334,8 @@ class Trainer:
     ):
         """Train the pipeline
 
+        At the end of the training the pipeline will load the weights from the best checkpoint.
+
         Parameters
         ----------
         output_dir
@@ -299,45 +346,25 @@ class Trainer:
         try:
             output_dir = Path(output_dir)
         except TypeError:
-            pass
+            output_dir = None
         else:
             output_dir.mkdir(exist_ok=exist_ok)
 
-        # create instances
-        train_instances = self._train_dataset.to_instances(
-            self._pipeline, lazy=self._lazy
-        )
-        valid_instances = (
-            None
-            if self._valid_dataset is None
-            else self._valid_dataset.to_instances(self._pipeline, lazy=self._lazy)
-        )
-
-        # create vocab
-        vocab_config = (
-            VocabularyConfiguration()
-            if self._vocab_config == "default"
-            else self._vocab_config
-        )
-        if vocab_config is not None:
-            vocab_datasets = [train_instances]
-            if valid_instances is not None and self._vocab_config.include_valid_data:
-                vocab_datasets += [valid_instances]
-            self._pipeline.create_vocab(vocab_datasets, config=vocab_config)
-
         # create dataloaders
         train_dataloader = create_dataloader(
-            train_instances,
+            self._train_instances,
             batch_size=self._trainer_config.batch_size,
             data_bucketing=self._trainer_config.data_bucketing,
+            num_workers=self._trainer_config.num_workers_for_dataloader,
         )
         valid_dataloader = (
             create_dataloader(
-                self._valid_dataset.to_instances(self._pipeline, lazy=self._lazy),
+                self._valid_instances,
                 batch_size=self._trainer_config.batch_size,
                 data_bucketing=self._trainer_config.data_bucketing,
+                num_workers=self._trainer_config.num_workers_for_dataloader,
             )
-            if self._valid_dataset is not None
+            if self._valid_instances is not None
             else None
         )
 
@@ -361,12 +388,16 @@ class Trainer:
                 self._load_best_weights()
             if output_dir:
                 self._pipeline.save(output_dir)
+                with (output_dir / "metrics.json").open("w") as file:
+                    json.dump(sanitize(self.trainer.logged_metrics), file)
+            if self._wandb_logger is not None:
+                self._wandb_logger.experiment.finish()
 
     def _load_best_weights(self):
         """Load weights from the best model checkpoint"""
         checkpoint_path = self._model_checkpoint.best_model_path
         if checkpoint_path:
-            _LOGGER.info("Loading best weights ...")
+            _LOGGER.debug("Loading best weights")
             checkpoint = pl_load(
                 checkpoint_path, map_location=lambda storage, loc: storage
             )
@@ -384,6 +415,7 @@ def create_dataloader(
     instance_dataset: InstanceDataset,
     batch_size: int = 16,
     data_bucketing: bool = False,
+    num_workers: int = 0,
 ) -> PyTorchDataLoader:
     """Returns a pytorch DataLoader for AllenNLP instances
 
@@ -396,6 +428,9 @@ def create_dataloader(
     data_bucketing
         If True, tries to sort batches with respect to the maximum input lengths per batch.
         Not supported for lazily loaded data!
+    num_workers
+        How many subprocesses to use for data loading. 0 means that the data will be loaded in the main process.
+        Default: 0
 
     Returns
     -------
@@ -416,4 +451,5 @@ def create_dataloader(
         )
         if data_bucketing
         else None,
+        num_workers=num_workers,
     )

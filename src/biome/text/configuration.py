@@ -1,4 +1,5 @@
 import copy
+import logging
 import os
 from dataclasses import dataclass
 from dataclasses import field
@@ -20,10 +21,7 @@ from allennlp.data import TokenIndexer
 from allennlp.data import Vocabulary
 from allennlp.modules import TextFieldEmbedder
 from pytorch_lightning import Callback
-from pytorch_lightning.accelerators import Accelerator
 from pytorch_lightning.loggers import LightningLoggerBase
-from pytorch_lightning.plugins import Plugin
-from pytorch_lightning.profiler import BaseProfiler
 
 from biome.text.features import CharFeatures
 from biome.text.features import TransformersFeatures
@@ -39,6 +37,8 @@ from biome.text.modules.heads.task_head import TaskHeadConfiguration
 from biome.text.modules.heads.token_classification import TokenClassification
 from biome.text.tokenizer import Tokenizer
 from biome.text.tokenizer import TransformersTokenizer
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class FeaturesConfiguration(FromParams):
@@ -448,8 +448,8 @@ class PipelineConfiguration(FromParams):
 
 
 @dataclass
-class TrainerConfiguration:
-    """Configures the training of a pipeline
+class AllenNLPTrainerConfiguration:
+    """Configures the training of a pipeline with the AllenNLP Trainer
 
     It is passed on to the `Pipeline.train` method. Doc strings mainly provided by
     [AllenNLP](https://docs.allennlp.org/master/api/training/trainer/#gradientdescenttrainer-objects)
@@ -661,8 +661,8 @@ class PredictionConfiguration:
 
 
 @dataclass
-class LightningTrainerConfiguration:
-    """Configuration for our Lightning Trainer
+class TrainerConfiguration:
+    """Configuration for the `biome.text.Trainer`.
 
     The docs are mainly a copy from the
     [Lightning Trainer API](https://pytorch-lightning.readthedocs.io/en/stable/api/pytorch_lightning.trainer.trainer.html#pytorch_lightning.trainer.trainer.Trainer)
@@ -681,7 +681,8 @@ class LightningTrainerConfiguration:
         Adds a default CSV logger if `logger` is not False. Default: True
 
     add_lr_monitor
-        Adds a default `LearningRateMonitor(logging_interval="step")` to the callbacks. Default: True
+        Adds a default `LearningRateMonitor(logging_interval="step")` to the callbacks.
+        By default (None), we will set this to true if you use either `warmup_steps` and/or `lr_decay`.
 
     add_tensorboard_logger
         Adds a default Tensorboard logger if `logger` is not False. Default: True
@@ -799,6 +800,10 @@ class LightningTrainerConfiguration:
         True). It also configures the default early stopping callback (`add_early_stopping` must be True).
         Default: 'min'
 
+    num_workers_for_dataloader
+        How many subprocesses to use for data loading. 0 means that the data will be loaded in the main process.
+        Default: 0
+
     num_sanity_val_steps
         Sanity check runs n validation batches before starting the training routine.
         Set it to `-1` to run all batches in all validation dataloaders. Default: 2
@@ -894,7 +899,7 @@ class LightningTrainerConfiguration:
     # non lightning trainer parameters
     add_early_stopping: bool = True
     add_csv_logger: bool = True
-    add_lr_monitor: bool = True
+    add_lr_monitor: Optional[bool] = None
     add_tensorboard_logger: bool = True
     add_wandb_logger: bool = True
     batch_size: int = 16
@@ -902,6 +907,7 @@ class LightningTrainerConfiguration:
     lr_decay: Optional[str] = None
     monitor: str = "validation_loss"
     monitor_mode: str = "min"
+    num_workers_for_dataloader: int = 0
     optimizer: Dict[str, Any] = field(
         default_factory=lambda: {"type": "adam", "lr": 0.001}
     )
@@ -909,6 +915,13 @@ class LightningTrainerConfiguration:
     save_top_k_checkpoints: int = 1
     warmup_steps: int = 0
     extra_lightning_params: Dict[str, Any] = field(default_factory=dict)
+
+    _LOGGER.warning(
+        "The former `TrainerConfiguration` class is now called `AllenNLPTrainerConfiguration` and is deprecated. "
+        "The current `TrainerConfiguration` is for configuring the new `biome.text.Trainer`. If you are still using "
+        "the `Pipeline.train()` method (deprecated), please use the `biome.text.AllenNLPTrainerConfiguration` to "
+        "configure it."
+    )
 
     def as_dict(self) -> Dict:
         """Returns the dataclass as dict without a deepcopy, in contrast to `dataclasses.asdict`"""
@@ -927,6 +940,7 @@ class LightningTrainerConfiguration:
             "lr_decay",
             "monitor",
             "monitor_mode",
+            "num_workers_for_dataloader",
             "optimizer",
             "patience",
             "save_top_k_checkpoints",

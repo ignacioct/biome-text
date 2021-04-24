@@ -119,6 +119,13 @@ class PipelineModel(allennlp.models.Model, pl.LightningModule):
         # https://pytorch-lightning.readthedocs.io/en/stable/common/optimizers.html#learning-rate-scheduling
         self.lr_scheduler: Optional[Dict] = None
 
+        self.best_metrics: Optional[Dict[str, torch.Tensor]] = None
+        # This is set by our trainer to figure out the best_metrics
+        # what metric to monitor?
+        self.monitor: Optional[str] = None
+        # shall the metric increase ("max") or decrease ("min")?
+        self.monitor_mode: Optional[str] = None
+
     def _update_head_related_attributes(self):
         """Updates the inputs/outputs and default mapping attributes, calculated from model head"""
         required, optional = split_signature_params_by_predicate(
@@ -204,6 +211,45 @@ class PipelineModel(allennlp.models.Model, pl.LightningModule):
         self.extend_embedder_vocab()
         # updates head specific things
         self._head.on_vocab_update()
+
+    def extend_embedder_vocab(
+        self, embedding_sources_mapping: Dict[str, str] = None
+    ) -> None:
+        """
+        Iterates through all embedding modules in the model and assures it can embed
+        with the extended vocab. This is required in fine-tuning or transfer learning
+        scenarios where model was trained with original vocabulary but during
+        fine-tuning/transfer-learning, it will have it work with extended vocabulary
+        (original + new-data vocabulary).
+
+        # Parameters
+
+        embedding_sources_mapping : `Dict[str, str]`, optional (default = `None`)
+            Mapping from model_path to pretrained-file path of the embedding
+            modules. If pretrained-file used at time of embedding initialization
+            isn't available now, user should pass this mapping. Model path is
+            path traversing the model attributes upto this embedding module.
+            Eg. "_text_field_embedder.token_embedder_tokens".
+        """
+        # self.named_modules() gives all sub-modules (including nested children)
+        # The path nesting is already separated by ".": eg. parent_module_name.child_module_name
+        embedding_sources_mapping = embedding_sources_mapping or {}
+        for model_path, module in self.named_modules():
+            if hasattr(module, "extend_vocab"):
+                pretrained_file = embedding_sources_mapping.get(model_path)
+                # Show useful information when reading from a pretrained file, kind of an ugly hack
+                if module._pretrained_file is not None:
+                    original_logging_level = logging.getLogger("allennlp").level
+                    logging.getLogger("allennlp").setLevel("INFO")
+
+                module.extend_vocab(
+                    self.vocab,
+                    extension_pretrained_file=pretrained_file,
+                    model_path=model_path,
+                )
+
+                if module._pretrained_file is not None:
+                    logging.getLogger("allennlp").setLevel(original_logging_level)
 
     @property
     def inputs(self) -> List[str]:
@@ -377,6 +423,10 @@ class PipelineModel(allennlp.models.Model, pl.LightningModule):
 
         return predictions
 
+    def on_fit_start(self) -> None:
+        # Reset metrics
+        self.best_metrics = None
+
     def training_step(self, batch, batch_idx) -> Dict:
         output = self(**batch)
         self.log(
@@ -421,14 +471,22 @@ class PipelineModel(allennlp.models.Model, pl.LightningModule):
         return output
 
     def validation_epoch_end(self, outputs: List[Any]) -> None:
+        # we do not want to log any metrics for the sanity check
+        if self.trainer.sanity_checking:
+            return
+
+        # we keep track of the logged metrics to figure out the best metrics
+        logged_metrics = {}
+
         averaged_epoch_loss = sum([output["loss"] for output in outputs]) / len(outputs)
         self.log(
-            "validation_loss",
+            f"{self.VALIDATION_METRICS_PREFIX}_loss",
             averaged_epoch_loss,
             on_step=False,
             prog_bar=True,
             on_epoch=True,
         )
+        logged_metrics[f"{self.VALIDATION_METRICS_PREFIX}_loss"] = averaged_epoch_loss
 
         metrics = self.get_metrics(reset=True)
         for key, val in metrics.items():
@@ -443,6 +501,29 @@ class PipelineModel(allennlp.models.Model, pl.LightningModule):
                 prog_bar=not key.startswith("_"),
                 on_epoch=True,
             )
+            logged_metrics[metric_name] = val
+
+        # log best metrics
+        logged_metrics["epoch"] = self.current_epoch
+        if self.best_metrics is None:
+            self.best_metrics = logged_metrics
+        elif (
+            self.monitor_mode == "max"
+            and self.best_metrics[self.monitor] < logged_metrics[self.monitor]
+        ):
+            self.best_metrics = logged_metrics
+        elif (
+            self.monitor_mode == "min"
+            and self.best_metrics[self.monitor] > logged_metrics[self.monitor]
+        ):
+            self.best_metrics = logged_metrics
+
+        self.log_dict(
+            {f"best_{key}": value for key, value in self.best_metrics.items()},
+            on_step=False,
+            prog_bar=False,
+            on_epoch=True,
+        )
 
     def configure_optimizers(self):
         if self.lr_scheduler is None:
