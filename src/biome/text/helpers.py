@@ -20,7 +20,6 @@ import yaml
 from allennlp.common import util
 from allennlp.data import Token as AllenNLPToken
 from allennlp.data.dataset_readers.dataset_utils import to_bioul
-from elasticsearch import Elasticsearch
 from spacy.tokens import Token as SpacyToken
 from spacy.tokens.doc import Doc
 
@@ -44,23 +43,6 @@ def yaml_to_dict(filepath: str) -> Dict[str, Any]:
     with open(filepath) as yaml_content:
         config = yaml.safe_load(yaml_content)
     return config
-
-
-def get_compatible_doc_type(client: Elasticsearch) -> str:
-    """Find a compatible name for doc type by checking the cluster info
-
-    Parameters
-    ----------
-    client
-        The elasticsearch client
-
-    Returns
-    -------
-    name
-        A compatible name for doc type in function of cluster version
-    """
-    es_version = int(client.info()["version"]["number"].split(".")[0])
-    return "_doc" if es_version >= 6 else "doc"
 
 
 def get_env_cuda_device() -> int:
@@ -256,6 +238,23 @@ def sanitize_for_params(x: Any) -> Any:
     elif hasattr(x, "to_json"):
         return x.to_json()
     return x
+
+
+def sanitize_for_yaml(value: Any):
+    """Sanitizes the value for a simple yaml output, that is classes only built-in types"""
+    if isinstance(value, list):
+        return [sanitize_for_yaml(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(sanitize_for_yaml(v) for v in value)
+    if isinstance(value, dict):
+        return {k: sanitize_for_yaml(v) for k, v in value.items()}
+    try:
+        yaml.dump(value)
+    # we try a string representation
+    except Exception:
+        return str(value)
+    else:
+        return value
 
 
 def span_labels_to_tag_labels(

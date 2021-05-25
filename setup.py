@@ -30,8 +30,6 @@ if __name__ == "__main__":
             "captum~=0.2.0",
             "click~=7.1.0",
             "datasets~=1.2.1",
-            "elasticsearch>=6.8.0,<7.5.0",
-            "fastapi~=0.55.0",
             "flask~=1.1.2",
             "flask-cors~=3.0.8",
             "flatdict~=4.0.0",
@@ -41,13 +39,15 @@ if __name__ == "__main__":
             "mlflow~=1.13.1",
             "numpy",
             "pandas",
-            "pytorch-lightning==1.3.0rc1",
-            "ray[tune]~=1.2.0",
+            "pytorch-lightning~=1.3.0",
+            "ray[tune]~=1.3.0",
             "spacy~=2.3.0",
             "torch",  # the version is defined by allennlp
             "transformers",  # the version is defined by allennlp
             "tqdm>=4.49.0",
-            "uvicorn~=0.11.0",
+            "fastapi>=0.63.0",
+            "uvicorn>=0.13.0",
+            "pyyaml",
         ],
         extras_require={
             "dev": [
@@ -64,12 +64,6 @@ if __name__ == "__main__":
                 "pre-commit~=2.9.0",
                 "GitPython",
             ],
-        },
-        package_data={
-            "biome": [
-                file.replace("src/biome/", "")
-                for file in glob.glob("src/biome/text/ui/webapp/**/*.*", recursive=True)
-            ]
         },
         entry_points={"console_scripts": ["biome=biome.text.cli:main"]},
         python_requires=">=3.6.1",  # taken from AllenNLP

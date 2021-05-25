@@ -28,6 +28,7 @@ from biome.text.features import TransformersFeatures
 from biome.text.features import WordFeatures
 from biome.text.featurizer import InputFeaturizer
 from biome.text.helpers import sanitize_for_params
+from biome.text.helpers import sanitize_for_yaml
 from biome.text.helpers import save_dict_as_yaml
 from biome.text.modules.encoders import Encoder
 from biome.text.modules.heads.classification.relation_classification import (
@@ -228,7 +229,8 @@ class TokenizerConfiguration(FromParams):
     end_tokens
         A list of token strings to the sequence after tokenized input text.
     use_transformers
-        If true, we will use a transformers tokenizer from HuggingFace and disregard all other parameters above.
+        If true, we will use a transformers tokenizer from HuggingFace and disregard all other parameters above
+        (except `max_sequence_length`!).
         If you specify any of the above parameters you want to set this to false.
         If None, we automatically choose the right value based on your feature and head configuration.
     transformers_kwargs
@@ -926,6 +928,18 @@ class TrainerConfiguration:
     def as_dict(self) -> Dict:
         """Returns the dataclass as dict without a deepcopy, in contrast to `dataclasses.asdict`"""
         return {fld.name: getattr(self, fld.name) for fld in fields(self)}
+
+    def to_yaml(self, path: Union[str, Path]):
+        """Saves the configuration as a yaml file"""
+        if isinstance(path, str):
+            path = Path(path)
+        with path.open("w") as yml_file:
+            yaml.dump(
+                sanitize_for_yaml(self.as_dict()),
+                yml_file,
+                default_flow_style=False,
+                allow_unicode=True,
+            )
 
     @property
     def lightning_params(self) -> Dict[str, Any]:
